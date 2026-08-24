@@ -35,8 +35,10 @@ Agentic Memory
 
 ## 目前進度
 
-Day 01：建立專案目標，釐清 Context 與 Memory 的差異。
+- Day 01：建立專案目標，釐清 Context 與 Memory 的差異。
+- Day 02：整理文字如何經過 Message、Context 與 Token 進入 LLM。
 
 ## 系列文章
 
 - [Day 01｜AI 真的記得你嗎？從 Stateless LLM 開始](https://ithelp.ithome.com.tw/articles/10404651)
+- [Day 02｜LLM 到底怎麼聊天？從 Token、Message 到 Context](https://ithelp.ithome.com.tw/articles/10404828)
