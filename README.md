@@ -37,8 +37,24 @@ Agentic Memory
 
 - Day 01：建立專案目標，釐清 Context 與 Memory 的差異。
 - Day 02：整理文字如何經過 Message、Context 與 Token 進入 LLM。
+- Day 03：完成 `Memora v0.1`，可在終端機連續提問，但每次 Request 仍彼此獨立。
+
+## 執行方式
+
+需求：Python 3.10 以上，以及可使用 OpenAI API 的金鑰。
+
+```bash
+python -m venv .venv
+source .venv/bin/activate  # Windows PowerShell：.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+export OPENAI_API_KEY="你的 API Key"
+python chatbot.py
+```
+
+輸入 `exit` 即可結束程式。API Key 由環境變數讀取，不會寫進原始碼或 Git repository。
 
 ## 系列文章
 
 - [Day 01｜AI 真的記得你嗎？從 Stateless LLM 開始](https://ithelp.ithome.com.tw/articles/10404651)
 - [Day 02｜LLM 到底怎麼聊天？從 Token、Message 到 Context](https://ithelp.ithome.com.tw/articles/10404828)
+- [Day 03｜用 Python + LLM API 做第一個 Chatbot](https://ithelp.ithome.com.tw/articles/10405086)
