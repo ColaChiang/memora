@@ -38,6 +38,7 @@ Agentic Memory
 - Day 01：建立專案目標，釐清 Context 與 Memory 的差異。
 - Day 02：整理文字如何經過 Message、Context 與 Token 進入 LLM。
 - Day 03：完成 `Memora v0.1`，可在終端機連續提問，但每次 Request 仍彼此獨立。
+- Day 04：加入固定的 System Prompt，讓 `Memora v0.2` 具備一致的角色、目標與回答原則。
 
 ## 執行方式
 
@@ -58,3 +59,4 @@ python chatbot.py
 - [Day 01｜AI 真的記得你嗎？從 Stateless LLM 開始](https://ithelp.ithome.com.tw/articles/10404651)
 - [Day 02｜LLM 到底怎麼聊天？從 Token、Message 到 Context](https://ithelp.ithome.com.tw/articles/10404828)
 - [Day 03｜用 Python + LLM API 做第一個 Chatbot](https://ithelp.ithome.com.tw/articles/10405086)
+- [Day 04｜Prompt 如何改變 AI？System Prompt 到 Prompt Engineering](https://ithelp.ithome.com.tw/articles/10405261)
