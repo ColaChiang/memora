@@ -25,12 +25,18 @@ def main() -> None:
     print("Memora v0.2")
     print("輸入 exit 可以結束對話。")
 
+    request_count = 1
+
     while True:
         user_input = input("\nYou: ")
 
         if user_input.lower() == "exit":
             print("Bye!")
             break
+
+        print(f"\n--- Request {request_count} ---")
+        print("Input:", user_input)
+        print("-------------------")
 
         response = client.responses.create(
             model=MODEL,
@@ -39,6 +45,7 @@ def main() -> None:
         )
 
         print("Memora:", response.output_text)
+        request_count += 1
 
 
 if __name__ == "__main__":
