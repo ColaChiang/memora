@@ -1,4 +1,4 @@
-"""Memora v0.2: a prompted but deliberately stateless chatbot."""
+"""Memora v0.3: an in-memory, stateful command-line chatbot."""
 
 from openai import OpenAI
 
@@ -22,10 +22,10 @@ Guidelines:
 def main() -> None:
     client = OpenAI()
 
-    print("Memora v0.2")
-    print("輸入 exit 可以結束對話。")
+    print("Memora v0.3")
+    print("輸入 history 可以查看對話紀錄，輸入 exit 可以結束對話。")
 
-    request_count = 1
+    conversation_history: list[dict[str, str]] = []
 
     while True:
         user_input = input("\nYou: ")
@@ -34,18 +34,41 @@ def main() -> None:
             print("Bye!")
             break
 
-        print(f"\n--- Request {request_count} ---")
-        print("Input:", user_input)
-        print("-------------------")
+        if user_input.lower() == "history":
+            print("\n--- Conversation History ---")
+
+            if not conversation_history:
+                print("（目前沒有對話紀錄）")
+            else:
+                for message in conversation_history:
+                    print(f"{message['role']}: {message['content']}")
+
+            print("----------------------------")
+            continue
+
+        conversation_history.append(
+            {
+                "role": "user",
+                "content": user_input,
+            }
+        )
 
         response = client.responses.create(
             model=MODEL,
             instructions=SYSTEM_PROMPT,
-            input=user_input,
+            input=conversation_history,
         )
 
-        print("Memora:", response.output_text)
-        request_count += 1
+        assistant_reply = response.output_text
+
+        conversation_history.append(
+            {
+                "role": "assistant",
+                "content": assistant_reply,
+            }
+        )
+
+        print("Memora:", assistant_reply)
 
 
 if __name__ == "__main__":

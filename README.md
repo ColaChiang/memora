@@ -40,6 +40,7 @@ Agentic Memory
 - Day 03：完成 `Memora v0.1`，可在終端機連續提問，但每次 Request 仍彼此獨立。
 - Day 04：加入固定的 System Prompt，讓 `Memora v0.2` 具備一致的角色、目標與回答原則。
 - Day 05：顯示每次送出的 Request 編號與 Input，直接觀察 while loop 不等於對話記憶。
+- Day 06：完成 `Memora v0.3`，在程式執行期間保存 Conversation History，並可用 `history` 查看內容。
 
 ## 執行方式
 
@@ -53,7 +54,9 @@ export OPENAI_API_KEY="你的 API Key"
 python chatbot.py
 ```
 
-輸入 `exit` 即可結束程式。API Key 由環境變數讀取，不會寫進原始碼或 Git repository。
+輸入 `history` 可以查看目前的 Conversation History，輸入 `exit` 即可結束程式。API Key 由環境變數讀取，不會寫進原始碼或 Git repository。
+
+目前的 History 只存在記憶體中；結束程式後便會消失。這是 Day 06 刻意保留的限制，後續才會加入 Context Management 與可持久化的長期記憶。
 
 ## 系列文章
 
@@ -62,3 +65,4 @@ python chatbot.py
 - [Day 03｜用 Python + LLM API 做第一個 Chatbot](https://ithelp.ithome.com.tw/articles/10405086)
 - [Day 04｜Prompt 如何改變 AI？System Prompt 到 Prompt Engineering](https://ithelp.ithome.com.tw/articles/10405261)
 - [Day 05｜為什麼 LLM API 聊完就忘？理解 Stateless API](https://ithelp.ithome.com.tw/articles/10405458)
+- [Day 06｜Conversation History 是什麼？讓 AI 接得上前一句](https://ithelp.ithome.com.tw/articles/10405749)
