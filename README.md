@@ -41,6 +41,7 @@ Agentic Memory
 - Day 04：加入固定的 System Prompt，讓 `Memora v0.2` 具備一致的角色、目標與回答原則。
 - Day 05：顯示每次送出的 Request 編號與 Input，直接觀察 while loop 不等於對話記憶。
 - Day 06：完成 `Memora v0.3`，在程式執行期間保存 Conversation History，並可用 `history` 查看內容。
+- Day 07：完成 `Memora v0.4`，顯示每輪與整個 Session 的 Token Usage。
 
 ## 執行方式
 
@@ -66,3 +67,4 @@ python chatbot.py
 - [Day 04｜Prompt 如何改變 AI？System Prompt 到 Prompt Engineering](https://ithelp.ithome.com.tw/articles/10405261)
 - [Day 05｜為什麼 LLM API 聊完就忘？理解 Stateless API](https://ithelp.ithome.com.tw/articles/10405458)
 - [Day 06｜Conversation History 是什麼？讓 AI 接得上前一句](https://ithelp.ithome.com.tw/articles/10405749)
+- [Day 07｜Context Window 為什麼會爆？Token Limit 的真相](https://ithelp.ithome.com.tw/articles/10405924)

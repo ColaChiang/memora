@@ -27,7 +27,14 @@ class FakeResponses:
 
     def create(self, **kwargs: object) -> object:
         self.calls.append(deepcopy(kwargs))
-        return types.SimpleNamespace(output_text=next(self.replies))
+        return types.SimpleNamespace(
+            output_text=next(self.replies),
+            usage=types.SimpleNamespace(
+                input_tokens=10,
+                output_tokens=5,
+                total_tokens=15,
+            ),
+        )
 
 
 class FakeClient:
@@ -65,6 +72,7 @@ class ChatbotTest(unittest.TestCase):
         self.assertEqual(len(second_input), 3)
         self.assertEqual(second_input[1]["role"], "assistant")
         self.assertIn("assistant: 你的英文程度是 B1。", output.getvalue())
+        self.assertIn("Session total tokens: 30", output.getvalue())
         self.assertIn("Bye!", output.getvalue())
 
 

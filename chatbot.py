@@ -1,4 +1,4 @@
-"""Memora v0.3: an in-memory, stateful command-line chatbot."""
+"""Memora v0.4: inspect how token usage grows with conversation history."""
 
 from openai import OpenAI
 
@@ -22,10 +22,11 @@ Guidelines:
 def main() -> None:
     client = OpenAI()
 
-    print("Memora v0.3")
+    print("Memora v0.4")
     print("輸入 history 可以查看對話紀錄，輸入 exit 可以結束對話。")
 
     conversation_history: list[dict[str, str]] = []
+    session_total_tokens = 0
 
     while True:
         user_input = input("\nYou: ")
@@ -69,6 +70,17 @@ def main() -> None:
         )
 
         print("Memora:", assistant_reply)
+
+        usage = response.usage
+        session_total_tokens += usage.total_tokens
+
+        print("\n--- Token Usage ---")
+        print("Messages sent:", len(conversation_history) - 1)
+        print("Input tokens:", usage.input_tokens)
+        print("Output tokens:", usage.output_tokens)
+        print("Total tokens:", usage.total_tokens)
+        print("Session total tokens:", session_total_tokens)
+        print("-------------------")
 
 
 if __name__ == "__main__":
