@@ -42,6 +42,7 @@ Agentic Memory
 - Day 05：顯示每次送出的 Request 編號與 Input，直接觀察 while loop 不等於對話記憶。
 - Day 06：完成 `Memora v0.3`，在程式執行期間保存 Conversation History，並可用 `history` 查看內容。
 - Day 07：完成 `Memora v0.4`，顯示每輪與整個 Session 的 Token Usage。
+- Day 08：完成 `Memora v0.5`，用完整 Turn 為單位建立 Sliding Window，並同時限制 Input Token Budget。
 
 ## 執行方式
 
@@ -68,3 +69,4 @@ python chatbot.py
 - [Day 05｜為什麼 LLM API 聊完就忘？理解 Stateless API](https://ithelp.ithome.com.tw/articles/10405458)
 - [Day 06｜Conversation History 是什麼？讓 AI 接得上前一句](https://ithelp.ithome.com.tw/articles/10405749)
 - [Day 07｜Context Window 為什麼會爆？Token Limit 的真相](https://ithelp.ithome.com.tw/articles/10405924)
+- [Day 08｜Token 太多怎麼辦？Sliding Window 與 Context Management](https://ithelp.ithome.com.tw/articles/10406021)

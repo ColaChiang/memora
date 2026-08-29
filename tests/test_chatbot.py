@@ -21,6 +21,11 @@ import chatbot
 class FakeResponses:
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
+        self.input_tokens = types.SimpleNamespace(
+            count=lambda **kwargs: types.SimpleNamespace(
+                input_tokens=len(kwargs["input"]) * 10,
+            )
+        )
         self.replies = iter(
             ["了解，我會記住。", "你的英文程度是 B1。"]
         )
@@ -74,6 +79,25 @@ class ChatbotTest(unittest.TestCase):
         self.assertIn("assistant: 你的英文程度是 B1。", output.getvalue())
         self.assertIn("Session total tokens: 30", output.getvalue())
         self.assertIn("Bye!", output.getvalue())
+
+    def test_context_window_keeps_complete_recent_turns(self) -> None:
+        client = FakeClient()
+        history = []
+        for index in range(5):
+            history.extend(
+                [
+                    {"role": "user", "content": f"question {index}"},
+                    {"role": "assistant", "content": f"answer {index}"},
+                ]
+            )
+        history.append({"role": "user", "content": "current question"})
+
+        context, token_count = chatbot.build_context_window(client, history)
+
+        self.assertEqual(len(context), 7)
+        self.assertEqual(context[0]["content"], "question 2")
+        self.assertEqual(context[-1]["content"], "current question")
+        self.assertEqual(token_count, 70)
 
 
 if __name__ == "__main__":
