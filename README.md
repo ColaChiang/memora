@@ -43,6 +43,7 @@ Agentic Memory
 - Day 06：完成 `Memora v0.3`，在程式執行期間保存 Conversation History，並可用 `history` 查看內容。
 - Day 07：完成 `Memora v0.4`，顯示每輪與整個 Session 的 Token Usage。
 - Day 08：完成 `Memora v0.5`，用完整 Turn 為單位建立 Sliding Window，並同時限制 Input Token Budget。
+- Day 09：完成 `Memora v0.6`，把離開 Window 的舊訊息壓縮成 Conversation Summary。
 
 ## 執行方式
 
@@ -70,3 +71,4 @@ python chatbot.py
 - [Day 06｜Conversation History 是什麼？讓 AI 接得上前一句](https://ithelp.ithome.com.tw/articles/10405749)
 - [Day 07｜Context Window 為什麼會爆？Token Limit 的真相](https://ithelp.ithome.com.tw/articles/10405924)
 - [Day 08｜Token 太多怎麼辦？Sliding Window 與 Context Management](https://ithelp.ithome.com.tw/articles/10406021)
+- [Day 09｜AI 也要做筆記：用 Summarization 壓縮對話](https://ithelp.ithome.com.tw/articles/10406389)

@@ -80,7 +80,7 @@ class ChatbotTest(unittest.TestCase):
         self.assertIn("Session total tokens: 30", output.getvalue())
         self.assertIn("Bye!", output.getvalue())
 
-    def test_context_window_keeps_complete_recent_turns(self) -> None:
+    def test_old_turns_are_summarized_and_recent_turns_stay_verbatim(self) -> None:
         client = FakeClient()
         history = []
         for index in range(5):
@@ -92,12 +92,13 @@ class ChatbotTest(unittest.TestCase):
             )
         history.append({"role": "user", "content": "current question"})
 
-        context, token_count = chatbot.build_context_window(client, history)
+        stats = chatbot.prepare_context(client, history, "", 0)
 
-        self.assertEqual(len(context), 7)
-        self.assertEqual(context[0]["content"], "question 2")
-        self.assertEqual(context[-1]["content"], "current question")
-        self.assertEqual(token_count, 70)
+        self.assertEqual(stats["summarized_count"], 4)
+        self.assertEqual(stats["newly_summarized_count"], 4)
+        self.assertEqual(stats["context_messages"][0]["role"], "developer")
+        self.assertEqual(stats["context_messages"][1]["content"], "question 2")
+        self.assertEqual(stats["context_messages"][-1]["content"], "current question")
 
 
 if __name__ == "__main__":

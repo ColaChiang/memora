@@ -1,4 +1,4 @@
-"""Memora v0.5: keep recent turns inside a bounded context window."""
+"""Memora v0.6: summarize older turns instead of discarding them."""
 
 from openai import OpenAI
 
@@ -20,6 +20,20 @@ Guidelines:
 - Do not add unrelated motivational text.
 """.strip()
 
+SUMMARY_INSTRUCTIONS = """
+You maintain a compact summary of an ongoing conversation.
+
+Requirements:
+- Merge the existing summary with the new messages.
+- Preserve user facts, preferences, goals, corrections, decisions, and unresolved questions.
+- Remove greetings, repetition, and unimportant wording.
+- Do not invent information.
+- If newer information corrects older information, keep the newer information.
+- Keep the summary under 150 words.
+- Use the same language as the conversation when possible.
+- Return only the updated summary.
+""".strip()
+
 
 def count_input_tokens(client: OpenAI, messages: list[dict[str, str]]) -> int:
     result = client.responses.input_tokens.count(
@@ -30,35 +44,126 @@ def count_input_tokens(client: OpenAI, messages: list[dict[str, str]]) -> int:
     return result.input_tokens
 
 
-def build_context_window(
+def format_messages(messages: list[dict[str, str]]) -> str:
+    return "\n\n".join(
+        f"[{message['role'].upper()}]\n{message['content']}"
+        for message in messages
+    )
+
+
+def update_summary(
+    client: OpenAI,
+    current_summary: str,
+    new_messages: list[dict[str, str]],
+):
+    summary_input = f"""
+Existing Summary:
+{current_summary or "(empty)"}
+
+New Messages:
+{format_messages(new_messages)}
+""".strip()
+
+    response = client.responses.create(
+        model=MODEL,
+        instructions=SUMMARY_INSTRUCTIONS,
+        input=summary_input,
+    )
+    return response.output_text.strip(), response.usage
+
+
+def create_context_messages(
+    summary: str,
+    recent_messages: list[dict[str, str]],
+    current_user_message: dict[str, str],
+) -> list[dict[str, str]]:
+    context_messages: list[dict[str, str]] = []
+
+    if summary:
+        context_messages.append(
+            {
+                "role": "developer",
+                "content": (
+                    "The following is a compact summary of earlier conversation. "
+                    "Use it as background context. If it conflicts with recent "
+                    f"messages, prefer the recent messages.\n\n{summary}"
+                ),
+            }
+        )
+
+    return context_messages + recent_messages + [current_user_message]
+
+
+def prepare_context(
     client: OpenAI,
     history: list[dict[str, str]],
-) -> tuple[list[dict[str, str]], int]:
-    """Keep whole recent turns, then trim until the input fits the budget."""
+    current_summary: str,
+    summarized_count: int,
+) -> dict[str, object]:
     current_user_message = history[-1]
     completed_messages = history[:-1]
-    recent_messages = completed_messages[-MAX_RECENT_TURNS * 2 :]
-    context_messages = recent_messages + [current_user_message]
+    summary_token_usage = 0
+    newly_summarized_count = 0
+    target_summarized_count = max(
+        0,
+        len(completed_messages) - MAX_RECENT_TURNS * 2,
+    )
+
+    if target_summarized_count > summarized_count:
+        new_messages = completed_messages[summarized_count:target_summarized_count]
+        current_summary, usage = update_summary(
+            client,
+            current_summary,
+            new_messages,
+        )
+        newly_summarized_count += len(new_messages)
+        summary_token_usage += usage.total_tokens
+        summarized_count = target_summarized_count
+
+    recent_messages = completed_messages[summarized_count:]
 
     while True:
+        context_messages = create_context_messages(
+            current_summary,
+            recent_messages,
+            current_user_message,
+        )
         input_tokens = count_input_tokens(client, context_messages)
 
         if input_tokens <= MAX_INPUT_TOKENS:
-            return context_messages, input_tokens
+            return {
+                "summary": current_summary,
+                "summarized_count": summarized_count,
+                "context_messages": context_messages,
+                "input_tokens": input_tokens,
+                "summary_token_usage": summary_token_usage,
+                "newly_summarized_count": newly_summarized_count,
+            }
 
-        if len(context_messages) == 1:
-            raise ValueError("目前的 User Message 本身已超過 Input Token Budget。")
+        if len(recent_messages) < 2:
+            raise ValueError("Summary 和目前的 User Message 已超過 Input Token Budget。")
 
-        context_messages = context_messages[2:]
+        oldest_turn = recent_messages[:2]
+        current_summary, usage = update_summary(
+            client,
+            current_summary,
+            oldest_turn,
+        )
+        recent_messages = recent_messages[2:]
+        summarized_count += 2
+        newly_summarized_count += 2
+        summary_token_usage += usage.total_tokens
 
 
 def main() -> None:
     client = OpenAI()
 
-    print("Memora v0.5")
-    print("Commands: history, context, exit")
+    print("Memora v0.6")
+    print("Commands: history, context, summary, exit")
 
     conversation_history: list[dict[str, str]] = []
+    conversation_summary = ""
+    summarized_message_count = 0
     last_context_messages: list[dict[str, str]] = []
     session_total_tokens = 0
 
@@ -81,6 +186,12 @@ def main() -> None:
             print("----------------------------")
             continue
 
+        if user_input.lower() == "summary":
+            print("\n--- Conversation Summary ---")
+            print(conversation_summary or "（目前還沒有產生 Summary）")
+            print("----------------------------")
+            continue
+
         if user_input.lower() == "context":
             print("\n--- Last Request Context ---")
             if not last_context_messages:
@@ -99,17 +210,22 @@ def main() -> None:
         )
 
         try:
-            context_messages, counted_input_tokens = build_context_window(
+            context_stats = prepare_context(
                 client,
                 conversation_history,
+                conversation_summary,
+                summarized_message_count,
             )
         except ValueError as error:
             conversation_history.pop()
             print("Error:", error)
             continue
 
+        conversation_summary = context_stats["summary"]
+        summarized_message_count = context_stats["summarized_count"]
+        context_messages = context_stats["context_messages"]
         last_context_messages = [message.copy() for message in context_messages]
-        skipped_message_count = len(conversation_history) - len(context_messages)
+        session_total_tokens += context_stats["summary_token_usage"]
 
         response = client.responses.create(
             model=MODEL,
@@ -133,11 +249,13 @@ def main() -> None:
 
         print("\n--- Context Management ---")
         print("Stored history messages:", len(conversation_history))
+        print("Summarized history messages:", summarized_message_count)
+        print("Newly summarized messages:", context_stats["newly_summarized_count"])
         print("Context messages sent:", len(context_messages))
-        print("Older messages skipped:", skipped_message_count)
-        print("Counted input tokens:", counted_input_tokens)
+        print("Counted input tokens:", context_stats["input_tokens"])
         print("Actual input tokens:", usage.input_tokens)
         print("Output tokens:", usage.output_tokens)
+        print("Summary update tokens:", context_stats["summary_token_usage"])
         print("Session total tokens:", session_total_tokens)
         print("--------------------------")
 
