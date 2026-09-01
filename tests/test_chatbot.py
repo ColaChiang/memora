@@ -92,13 +92,21 @@ class ChatbotTest(unittest.TestCase):
             )
         history.append({"role": "user", "content": "current question"})
 
-        stats = chatbot.prepare_context(client, history, "", 0)
+        memory = chatbot.ShortTermMemory(client=client)
+        memory.history = history
+        stats = memory.prepare_context()
 
-        self.assertEqual(stats["summarized_count"], 4)
         self.assertEqual(stats["newly_summarized_count"], 4)
+        self.assertEqual(memory.summarized_message_count, 4)
         self.assertEqual(stats["context_messages"][0]["role"], "developer")
         self.assertEqual(stats["context_messages"][1]["content"], "question 2")
         self.assertEqual(stats["context_messages"][-1]["content"], "current question")
+
+    def test_failed_request_can_roll_back_the_pending_user_message(self) -> None:
+        memory = chatbot.ShortTermMemory(client=FakeClient())
+        memory.add_user_message("temporary")
+        memory.rollback_last_user_message()
+        self.assertEqual(memory.history, [])
 
 
 if __name__ == "__main__":
