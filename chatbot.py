@@ -1,4 +1,4 @@
-"""Memora v0.8: distinguish selected memory candidates from chat history."""
+"""Memora v0.9: automatically extract long-term memory candidates."""
 
 from openai import OpenAI
 
@@ -33,6 +33,50 @@ Requirements:
 - Use the same language as the conversation when possible.
 - Return only the updated summary.
 """.strip()
+
+MEMORY_EXTRACTION_INSTRUCTIONS = """
+You extract potential long-term memories from a user message
+for a personal English learning assistant.
+
+Extract only information that may be useful in future conversations, such as:
+- The user's English level
+- Long-term learning goals
+- Stable learning preferences
+- Recurring learning difficulties
+- Relevant learning constraints
+
+Do not extract:
+- Greetings or casual conversation
+- One-time requests
+- Questions that only depend on the current context
+- Information created by the assistant
+- Uncertain assumptions
+- Passwords, secret codes, or unnecessary sensitive data
+
+Rewrite each memory as a short, self-contained statement.
+Return exactly NONE, or one or more lines in this format:
+MEMORY: <memory>
+Do not add explanations or Markdown.
+""".strip()
+
+
+def extract_memory_candidates(client: OpenAI, user_input: str) -> tuple[list[str], int, str]:
+    response = client.responses.create(
+        model=MODEL,
+        instructions=MEMORY_EXTRACTION_INSTRUCTIONS,
+        input=user_input,
+    )
+    raw_output = response.output_text.strip()
+    candidates: list[str] = []
+
+    if raw_output.upper() != "NONE":
+        for line in raw_output.splitlines():
+            if line.strip().upper().startswith("MEMORY:"):
+                candidate = line.split(":", 1)[1].strip()
+                if candidate:
+                    candidates.append(candidate)
+
+    return candidates, response.usage.total_tokens, raw_output
 
 
 class ShortTermMemory:
@@ -179,6 +223,9 @@ New messages:
         self.last_context = [message.copy() for message in context_messages]
         self.session_total_tokens += response_tokens
 
+    def add_token_usage(self, total_tokens: int) -> None:
+        self.session_total_tokens += total_tokens
+
     def get_status(self) -> dict[str, object]:
         return {
             "History messages": len(self.history),
@@ -203,11 +250,12 @@ def main() -> None:
     client = OpenAI()
     memory = ShortTermMemory(client=client)
     memory_candidates: list[str] = []
+    last_extraction_output = ""
 
-    print("Memora v0.8")
+    print("Memora v0.9")
     print(
         "Commands: history, context, summary, status, "
-        "remember <text>, memories, exit"
+        "remember <text>, memories, extraction, exit"
     )
 
     while True:
@@ -215,6 +263,7 @@ def main() -> None:
         if not user_input:
             continue
         command = user_input.lower()
+        should_auto_extract = True
 
         if command == "exit":
             print("Bye!")
@@ -239,6 +288,11 @@ def main() -> None:
                     print(f"{index}. {candidate}")
             print("-------------------------")
             continue
+        if command == "extraction":
+            print("\n--- Last Extraction Output ---")
+            print(last_extraction_output or "(not run)")
+            print("------------------------------")
+            continue
         if command == "status":
             print("\n--- Short-term Memory Status ---")
             for name, value in memory.get_status().items():
@@ -257,6 +311,8 @@ def main() -> None:
             memory_candidates.append(candidate)
             print("Saved as Memory Candidate:", candidate)
             user_input = candidate
+            should_auto_extract = False
+            last_extraction_output = "(manual memory)"
 
         memory.add_user_message(user_input)
         try:
@@ -278,7 +334,26 @@ def main() -> None:
             response_tokens=response.usage.total_tokens,
         )
 
+        extracted_candidates: list[str] = []
+        extraction_tokens = 0
+        if should_auto_extract:
+            try:
+                (
+                    extracted_candidates,
+                    extraction_tokens,
+                    last_extraction_output,
+                ) = extract_memory_candidates(client, user_input)
+                memory_candidates.extend(extracted_candidates)
+                memory.add_token_usage(extraction_tokens)
+            except Exception as error:
+                last_extraction_output = f"Extraction failed: {error}"
+
         print("Memora:", assistant_reply)
+        if extracted_candidates:
+            print("\n--- New Memory Candidates ---")
+            for candidate in extracted_candidates:
+                print("-", candidate)
+            print("-----------------------------")
         print("\n--- Memory Status ---")
         print("Newly summarized messages:", memory_stats["newly_summarized_count"])
         print("Context messages sent:", len(memory_stats["context_messages"]))
@@ -286,6 +361,7 @@ def main() -> None:
         print("Actual input tokens:", response.usage.input_tokens)
         print("Output tokens:", response.usage.output_tokens)
         print("Summary update tokens:", memory_stats["summary_token_usage"])
+        print("Memory extraction tokens:", extraction_tokens)
         print("Memory candidates:", len(memory_candidates))
         print("Session total tokens:", memory.session_total_tokens)
         print("---------------------")

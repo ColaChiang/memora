@@ -46,6 +46,7 @@ Agentic Memory
 - Day 09：完成 `Memora v0.6`，把離開 Window 的舊訊息壓縮成 Conversation Summary。
 - Day 10：完成 `Memora v0.7`，把 History、Summary、Token Budget 與 Context 組裝封裝成 `ShortTermMemory`。
 - Day 11：完成 `Memora v0.8`，用 `remember` 與 `memories` 區分聊天紀錄和 Memory Candidate。
+- Day 12：完成 `Memora v0.9`，用獨立的 LLM 任務從 User Message 自動抽取 Memory Candidate。
 
 ## 執行方式
 
@@ -76,3 +77,4 @@ python chatbot.py
 - [Day 09｜AI 也要做筆記：用 Summarization 壓縮對話](https://ithelp.ithome.com.tw/articles/10406389)
 - [Day 10｜Short-term Memory 完成：打造 Stateful Chatbot](https://ithelp.ithome.com.tw/articles/10406390)
 - [Day 11｜什麼事情值得 AI 記住？從聊天紀錄到 Memory](https://ithelp.ithome.com.tw/articles/10406392)
+- [Day 12｜讓 LLM 自動抽取 Memory：從對話找到重要資訊](https://ithelp.ithome.com.tw/articles/10407127)

@@ -29,9 +29,19 @@ class FakeResponses:
         self.replies = iter(
             ["了解，我會記住。", "你的英文程度是 B1。"]
         )
+        self.extraction_output = "NONE"
 
     def create(self, **kwargs: object) -> object:
         self.calls.append(deepcopy(kwargs))
+        if kwargs.get("instructions") == chatbot.MEMORY_EXTRACTION_INSTRUCTIONS:
+            return types.SimpleNamespace(
+                output_text=self.extraction_output,
+                usage=types.SimpleNamespace(
+                    input_tokens=8,
+                    output_tokens=2,
+                    total_tokens=10,
+                ),
+            )
         return types.SimpleNamespace(
             output_text=next(self.replies),
             usage=types.SimpleNamespace(
@@ -67,8 +77,13 @@ class ChatbotTest(unittest.TestCase):
         ):
             chatbot.main()
 
-        first_input = client.responses.calls[0]["input"]
-        second_input = client.responses.calls[1]["input"]
+        chat_calls = [
+            call
+            for call in client.responses.calls
+            if call.get("instructions") == chatbot.SYSTEM_PROMPT
+        ]
+        first_input = chat_calls[0]["input"]
+        second_input = chat_calls[1]["input"]
 
         self.assertEqual(
             first_input,
@@ -77,7 +92,7 @@ class ChatbotTest(unittest.TestCase):
         self.assertEqual(len(second_input), 3)
         self.assertEqual(second_input[1]["role"], "assistant")
         self.assertIn("assistant: 你的英文程度是 B1。", output.getvalue())
-        self.assertIn("Session total tokens: 30", output.getvalue())
+        self.assertIn("Session total tokens: 50", output.getvalue())
         self.assertIn("Bye!", output.getvalue())
 
     def test_old_turns_are_summarized_and_recent_turns_stay_verbatim(self) -> None:
@@ -122,6 +137,23 @@ class ChatbotTest(unittest.TestCase):
 
         self.assertIn("Saved as Memory Candidate", output.getvalue())
         self.assertIn("1. 我的英文程度是 B1。", output.getvalue())
+
+    def test_extracts_only_memory_prefixed_lines(self) -> None:
+        client = FakeClient()
+        client.responses.extraction_output = (
+            "MEMORY: 使用者的英文程度是 B1。\n"
+            "This line should be ignored.\n"
+            "MEMORY: 使用者想加強旅遊英文。"
+        )
+
+        candidates, tokens, raw = chatbot.extract_memory_candidates(
+            client,
+            "我的英文程度是 B1，我想加強旅遊英文。",
+        )
+
+        self.assertEqual(len(candidates), 2)
+        self.assertEqual(tokens, 10)
+        self.assertIn("MEMORY:", raw)
 
 
 if __name__ == "__main__":
