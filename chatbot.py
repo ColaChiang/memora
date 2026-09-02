@@ -1,4 +1,4 @@
-"""Memora v0.7: encapsulate stateful context handling as short-term memory."""
+"""Memora v0.8: distinguish selected memory candidates from chat history."""
 
 from openai import OpenAI
 
@@ -202,13 +202,19 @@ def print_messages(title: str, messages: list[dict[str, str]]) -> None:
 def main() -> None:
     client = OpenAI()
     memory = ShortTermMemory(client=client)
+    memory_candidates: list[str] = []
 
-    print("Memora v0.7")
-    print("Commands: history, context, summary, status, exit")
+    print("Memora v0.8")
+    print(
+        "Commands: history, context, summary, status, "
+        "remember <text>, memories, exit"
+    )
 
     while True:
-        user_input = input("\nYou: ")
-        command = user_input.lower().strip()
+        user_input = input("\nYou: ").strip()
+        if not user_input:
+            continue
+        command = user_input.lower()
 
         if command == "exit":
             print("Bye!")
@@ -224,12 +230,33 @@ def main() -> None:
             print(memory.summary or "(empty)")
             print("----------------------------")
             continue
+        if command == "memories":
+            print("\n--- Memory Candidates ---")
+            if not memory_candidates:
+                print("(empty)")
+            else:
+                for index, candidate in enumerate(memory_candidates, start=1):
+                    print(f"{index}. {candidate}")
+            print("-------------------------")
+            continue
         if command == "status":
             print("\n--- Short-term Memory Status ---")
             for name, value in memory.get_status().items():
                 print(f"{name}: {value}")
+            print("Memory candidates:", len(memory_candidates))
             print("--------------------------------")
             continue
+        if command == "remember":
+            print("Usage: remember <text>")
+            continue
+        if command.startswith("remember "):
+            candidate = user_input[len("remember ") :].strip()
+            if not candidate:
+                print("Usage: remember <text>")
+                continue
+            memory_candidates.append(candidate)
+            print("Saved as Memory Candidate:", candidate)
+            user_input = candidate
 
         memory.add_user_message(user_input)
         try:
@@ -259,6 +286,7 @@ def main() -> None:
         print("Actual input tokens:", response.usage.input_tokens)
         print("Output tokens:", response.usage.output_tokens)
         print("Summary update tokens:", memory_stats["summary_token_usage"])
+        print("Memory candidates:", len(memory_candidates))
         print("Session total tokens:", memory.session_total_tokens)
         print("---------------------")
 

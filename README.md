@@ -45,6 +45,7 @@ Agentic Memory
 - Day 08：完成 `Memora v0.5`，用完整 Turn 為單位建立 Sliding Window，並同時限制 Input Token Budget。
 - Day 09：完成 `Memora v0.6`，把離開 Window 的舊訊息壓縮成 Conversation Summary。
 - Day 10：完成 `Memora v0.7`，把 History、Summary、Token Budget 與 Context 組裝封裝成 `ShortTermMemory`。
+- Day 11：完成 `Memora v0.8`，用 `remember` 與 `memories` 區分聊天紀錄和 Memory Candidate。
 
 ## 執行方式
 
@@ -74,3 +75,4 @@ python chatbot.py
 - [Day 08｜Token 太多怎麼辦？Sliding Window 與 Context Management](https://ithelp.ithome.com.tw/articles/10406021)
 - [Day 09｜AI 也要做筆記：用 Summarization 壓縮對話](https://ithelp.ithome.com.tw/articles/10406389)
 - [Day 10｜Short-term Memory 完成：打造 Stateful Chatbot](https://ithelp.ithome.com.tw/articles/10406390)
+- [Day 11｜什麼事情值得 AI 記住？從聊天紀錄到 Memory](https://ithelp.ithome.com.tw/articles/10406392)

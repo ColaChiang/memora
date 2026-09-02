@@ -108,6 +108,21 @@ class ChatbotTest(unittest.TestCase):
         memory.rollback_last_user_message()
         self.assertEqual(memory.history, [])
 
+    def test_remember_command_saves_a_candidate(self) -> None:
+        client = FakeClient()
+        inputs = iter(["remember 我的英文程度是 B1。", "memories", "exit"])
+        output = StringIO()
+
+        with (
+            patch.object(chatbot, "OpenAI", return_value=client),
+            patch.object(builtins, "input", side_effect=lambda _="": next(inputs)),
+            contextlib.redirect_stdout(output),
+        ):
+            chatbot.main()
+
+        self.assertIn("Saved as Memory Candidate", output.getvalue())
+        self.assertIn("1. 我的英文程度是 B1。", output.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()
