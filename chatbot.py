@@ -1,6 +1,7 @@
-"""Memora v0.9: automatically extract long-term memory candidates."""
+"""Memora v0.10: extract typed memory candidates with structured output."""
 
 from openai import OpenAI
+from pydantic import BaseModel, Field
 
 
 MODEL = "gpt-5-mini"
@@ -54,29 +55,55 @@ Do not extract:
 - Passwords, secret codes, or unnecessary sensitive data
 
 Rewrite each memory as a short, self-contained statement.
-Return exactly NONE, or one or more lines in this format:
-MEMORY: <memory>
-Do not add explanations or Markdown.
+
+If the message contains useful information:
+- Set should_remember to true.
+- Add each independent memory to memories.
+
+If the message contains no useful information:
+- Set should_remember to false.
+- Return an empty memories list.
+
+Do not invent information that the user did not state.
 """.strip()
 
 
-def extract_memory_candidates(client: OpenAI, user_input: str) -> tuple[list[str], int, str]:
-    response = client.responses.create(
-        model=MODEL,
-        instructions=MEMORY_EXTRACTION_INSTRUCTIONS,
-        input=user_input,
+class MemoryCandidate(BaseModel):
+    content: str = Field(
+        description=(
+            "A short, self-contained fact about the user that may be useful "
+            "in future conversations."
+        )
     )
-    raw_output = response.output_text.strip()
-    candidates: list[str] = []
 
-    if raw_output.upper() != "NONE":
-        for line in raw_output.splitlines():
-            if line.strip().upper().startswith("MEMORY:"):
-                candidate = line.split(":", 1)[1].strip()
-                if candidate:
-                    candidates.append(candidate)
 
-    return candidates, response.usage.total_tokens, raw_output
+class MemoryExtractionResult(BaseModel):
+    should_remember: bool = Field(
+        description="Whether the user message contains information worth remembering."
+    )
+    memories: list[MemoryCandidate] = Field(
+        description=(
+            "Memories extracted from the user message; empty when "
+            "should_remember is false."
+        )
+    )
+
+
+def extract_memory_candidates(
+    client: OpenAI,
+    user_input: str,
+) -> tuple[MemoryExtractionResult, int]:
+    response = client.responses.parse(
+        model=MODEL,
+        input=[
+            {"role": "system", "content": MEMORY_EXTRACTION_INSTRUCTIONS},
+            {"role": "user", "content": user_input},
+        ],
+        text_format=MemoryExtractionResult,
+    )
+    if response.output_parsed is None:
+        raise ValueError("Memory Extraction 沒有產生可解析的結果。")
+    return response.output_parsed, response.usage.total_tokens
 
 
 class ShortTermMemory:
@@ -249,10 +276,10 @@ def print_messages(title: str, messages: list[dict[str, str]]) -> None:
 def main() -> None:
     client = OpenAI()
     memory = ShortTermMemory(client=client)
-    memory_candidates: list[str] = []
+    memory_candidates: list[MemoryCandidate] = []
     last_extraction_output = ""
 
-    print("Memora v0.9")
+    print("Memora v0.10")
     print(
         "Commands: history, context, summary, status, "
         "remember <text>, memories, extraction, exit"
@@ -285,7 +312,7 @@ def main() -> None:
                 print("(empty)")
             else:
                 for index, candidate in enumerate(memory_candidates, start=1):
-                    print(f"{index}. {candidate}")
+                    print(f"{index}. {candidate.content}")
             print("-------------------------")
             continue
         if command == "extraction":
@@ -304,15 +331,16 @@ def main() -> None:
             print("Usage: remember <text>")
             continue
         if command.startswith("remember "):
-            candidate = user_input[len("remember ") :].strip()
-            if not candidate:
+            candidate_text = user_input[len("remember ") :].strip()
+            if not candidate_text:
                 print("Usage: remember <text>")
                 continue
+            candidate = MemoryCandidate(content=candidate_text)
             memory_candidates.append(candidate)
-            print("Saved as Memory Candidate:", candidate)
-            user_input = candidate
+            print("Saved as Memory Candidate:", candidate.content)
+            user_input = candidate_text
             should_auto_extract = False
-            last_extraction_output = "(manual memory)"
+            last_extraction_output = candidate.model_dump_json(indent=2)
 
         memory.add_user_message(user_input)
         try:
@@ -334,16 +362,18 @@ def main() -> None:
             response_tokens=response.usage.total_tokens,
         )
 
-        extracted_candidates: list[str] = []
+        extracted_candidates: list[MemoryCandidate] = []
         extraction_tokens = 0
         if should_auto_extract:
             try:
-                (
-                    extracted_candidates,
-                    extraction_tokens,
-                    last_extraction_output,
-                ) = extract_memory_candidates(client, user_input)
-                memory_candidates.extend(extracted_candidates)
+                extraction_result, extraction_tokens = extract_memory_candidates(
+                    client,
+                    user_input,
+                )
+                last_extraction_output = extraction_result.model_dump_json(indent=2)
+                if extraction_result.should_remember:
+                    extracted_candidates = extraction_result.memories
+                    memory_candidates.extend(extracted_candidates)
                 memory.add_token_usage(extraction_tokens)
             except Exception as error:
                 last_extraction_output = f"Extraction failed: {error}"
@@ -352,7 +382,7 @@ def main() -> None:
         if extracted_candidates:
             print("\n--- New Memory Candidates ---")
             for candidate in extracted_candidates:
-                print("-", candidate)
+                print("-", candidate.content)
             print("-----------------------------")
         print("\n--- Memory Status ---")
         print("Newly summarized messages:", memory_stats["newly_summarized_count"])

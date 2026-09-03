@@ -29,25 +29,30 @@ class FakeResponses:
         self.replies = iter(
             ["了解，我會記住。", "你的英文程度是 B1。"]
         )
-        self.extraction_output = "NONE"
+        self.extraction_result = chatbot.MemoryExtractionResult(
+            should_remember=False,
+            memories=[],
+        )
 
     def create(self, **kwargs: object) -> object:
         self.calls.append(deepcopy(kwargs))
-        if kwargs.get("instructions") == chatbot.MEMORY_EXTRACTION_INSTRUCTIONS:
-            return types.SimpleNamespace(
-                output_text=self.extraction_output,
-                usage=types.SimpleNamespace(
-                    input_tokens=8,
-                    output_tokens=2,
-                    total_tokens=10,
-                ),
-            )
         return types.SimpleNamespace(
             output_text=next(self.replies),
             usage=types.SimpleNamespace(
                 input_tokens=10,
                 output_tokens=5,
                 total_tokens=15,
+            ),
+        )
+
+    def parse(self, **kwargs: object) -> object:
+        self.calls.append(deepcopy(kwargs))
+        return types.SimpleNamespace(
+            output_parsed=self.extraction_result,
+            usage=types.SimpleNamespace(
+                input_tokens=8,
+                output_tokens=2,
+                total_tokens=10,
             ),
         )
 
@@ -138,22 +143,25 @@ class ChatbotTest(unittest.TestCase):
         self.assertIn("Saved as Memory Candidate", output.getvalue())
         self.assertIn("1. 我的英文程度是 B1。", output.getvalue())
 
-    def test_extracts_only_memory_prefixed_lines(self) -> None:
+    def test_extracts_structured_memory_candidates(self) -> None:
         client = FakeClient()
-        client.responses.extraction_output = (
-            "MEMORY: 使用者的英文程度是 B1。\n"
-            "This line should be ignored.\n"
-            "MEMORY: 使用者想加強旅遊英文。"
+        client.responses.extraction_result = chatbot.MemoryExtractionResult(
+            should_remember=True,
+            memories=[
+                chatbot.MemoryCandidate(content="使用者的英文程度是 B1。"),
+                chatbot.MemoryCandidate(content="使用者想加強旅遊英文。"),
+            ],
         )
 
-        candidates, tokens, raw = chatbot.extract_memory_candidates(
+        result, tokens = chatbot.extract_memory_candidates(
             client,
             "我的英文程度是 B1，我想加強旅遊英文。",
         )
 
-        self.assertEqual(len(candidates), 2)
+        self.assertTrue(result.should_remember)
+        self.assertEqual(len(result.memories), 2)
+        self.assertEqual(result.memories[0].content, "使用者的英文程度是 B1。")
         self.assertEqual(tokens, 10)
-        self.assertIn("MEMORY:", raw)
 
 
 if __name__ == "__main__":
