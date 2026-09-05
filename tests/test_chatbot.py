@@ -60,6 +60,23 @@ class FakeResponses:
 class FakeClient:
     def __init__(self) -> None:
         self.responses = FakeResponses()
+        self.embeddings = FakeEmbeddings()
+
+
+class FakeEmbeddings:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def create(self, **kwargs: object) -> object:
+        self.calls.append(deepcopy(kwargs))
+        texts = kwargs["input"]
+        return types.SimpleNamespace(
+            data=[
+                types.SimpleNamespace(index=index, embedding=[1.0, float(index)])
+                for index, _ in enumerate(texts)
+            ],
+            usage=types.SimpleNamespace(total_tokens=len(texts) * 3),
+        )
 
 
 class ChatbotTest(unittest.TestCase):
@@ -140,7 +157,7 @@ class ChatbotTest(unittest.TestCase):
         ):
             chatbot.main()
 
-        self.assertIn("Saved as Memory Candidate", output.getvalue())
+        self.assertIn("New Embedded Memories", output.getvalue())
         self.assertIn("1. 我的英文程度是 B1。", output.getvalue())
 
     def test_extracts_structured_memory_candidates(self) -> None:
@@ -162,6 +179,24 @@ class ChatbotTest(unittest.TestCase):
         self.assertEqual(len(result.memories), 2)
         self.assertEqual(result.memories[0].content, "使用者的英文程度是 B1。")
         self.assertEqual(tokens, 10)
+
+    def test_embeds_candidates_in_api_index_order(self) -> None:
+        client = FakeClient()
+        embedded, tokens = chatbot.embed_memory_candidates(
+            client,
+            [
+                chatbot.MemoryCandidate(content="first"),
+                chatbot.MemoryCandidate(content="second"),
+            ],
+        )
+
+        self.assertEqual([item.content for item in embedded], ["first", "second"])
+        self.assertEqual(embedded[1].embedding, [1.0, 1.0])
+        self.assertEqual(tokens, 6)
+        self.assertAlmostEqual(
+            chatbot.cosine_similarity([1.0, 0.0], [1.0, 0.0]),
+            1.0,
+        )
 
 
 if __name__ == "__main__":

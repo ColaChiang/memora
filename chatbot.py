@@ -1,10 +1,12 @@
-"""Memora v0.10: extract typed memory candidates with structured output."""
+"""Memora v0.11: represent memory candidates with embedding vectors."""
 
+from math import sqrt
 from openai import OpenAI
 from pydantic import BaseModel, Field
 
 
 MODEL = "gpt-5-mini"
+EMBEDDING_MODEL = "text-embedding-3-small"
 MAX_INPUT_TOKENS = 1000
 MAX_RECENT_TURNS = 3
 
@@ -89,6 +91,11 @@ class MemoryExtractionResult(BaseModel):
     )
 
 
+class EmbeddedMemoryCandidate(BaseModel):
+    content: str
+    embedding: list[float]
+
+
 def extract_memory_candidates(
     client: OpenAI,
     user_input: str,
@@ -104,6 +111,40 @@ def extract_memory_candidates(
     if response.output_parsed is None:
         raise ValueError("Memory Extraction 沒有產生可解析的結果。")
     return response.output_parsed, response.usage.total_tokens
+
+
+def embed_memory_candidates(
+    client: OpenAI,
+    candidates: list[MemoryCandidate],
+) -> tuple[list[EmbeddedMemoryCandidate], int]:
+    if not candidates:
+        return [], 0
+
+    response = client.embeddings.create(
+        model=EMBEDDING_MODEL,
+        input=[candidate.content for candidate in candidates],
+        encoding_format="float",
+    )
+    embedding_data = sorted(response.data, key=lambda item: item.index)
+    embedded = [
+        EmbeddedMemoryCandidate(
+            content=candidate.content,
+            embedding=data.embedding,
+        )
+        for candidate, data in zip(candidates, embedding_data)
+    ]
+    return embedded, response.usage.total_tokens
+
+
+def cosine_similarity(vector_a: list[float], vector_b: list[float]) -> float:
+    if len(vector_a) != len(vector_b):
+        raise ValueError("兩個 Vector 的 Dimension 不一致。")
+    dot_product = sum(a * b for a, b in zip(vector_a, vector_b))
+    magnitude_a = sqrt(sum(value * value for value in vector_a))
+    magnitude_b = sqrt(sum(value * value for value in vector_b))
+    if magnitude_a == 0 or magnitude_b == 0:
+        return 0.0
+    return dot_product / (magnitude_a * magnitude_b)
 
 
 class ShortTermMemory:
@@ -276,13 +317,14 @@ def print_messages(title: str, messages: list[dict[str, str]]) -> None:
 def main() -> None:
     client = OpenAI()
     memory = ShortTermMemory(client=client)
-    memory_candidates: list[MemoryCandidate] = []
+    memory_candidates: list[EmbeddedMemoryCandidate] = []
     last_extraction_output = ""
 
-    print("Memora v0.10")
+    print("Memora v0.11")
     print(
         "Commands: history, context, summary, status, "
-        "remember <text>, memories, extraction, exit"
+        "remember <text>, memories, extraction, vector <number>, "
+        "similarity <a> <b>, exit"
     )
 
     while True:
@@ -291,6 +333,10 @@ def main() -> None:
             continue
         command = user_input.lower()
         should_auto_extract = True
+        extraction_tokens = 0
+        embedding_tokens = 0
+        embedding_error = ""
+        new_embedded_candidates: list[EmbeddedMemoryCandidate] = []
 
         if command == "exit":
             print("Bye!")
@@ -312,7 +358,10 @@ def main() -> None:
                 print("(empty)")
             else:
                 for index, candidate in enumerate(memory_candidates, start=1):
-                    print(f"{index}. {candidate.content}")
+                    print(
+                        f"{index}. {candidate.content} "
+                        f"({len(candidate.embedding)} dimensions)"
+                    )
             print("-------------------------")
             continue
         if command == "extraction":
@@ -320,11 +369,56 @@ def main() -> None:
             print(last_extraction_output or "(not run)")
             print("------------------------------")
             continue
+        if command == "vector":
+            print("Usage: vector <memory number>")
+            continue
+        if command.startswith("vector "):
+            try:
+                memory_number = int(command.split()[1])
+                if memory_number < 1:
+                    raise IndexError
+                candidate = memory_candidates[memory_number - 1]
+            except (ValueError, IndexError):
+                print("Invalid memory number.")
+                continue
+            print("\n--- Embedding Vector ---")
+            print("Content:", candidate.content)
+            print("Model:", EMBEDDING_MODEL)
+            print("Dimensions:", len(candidate.embedding))
+            print("Preview:", [round(value, 6) for value in candidate.embedding[:8]])
+            print("------------------------")
+            continue
+        if command == "similarity":
+            print("Usage: similarity <memory number 1> <memory number 2>")
+            continue
+        if command.startswith("similarity "):
+            try:
+                parts = command.split()
+                first_number = int(parts[1])
+                second_number = int(parts[2])
+                if first_number < 1 or second_number < 1:
+                    raise IndexError
+                first_memory = memory_candidates[first_number - 1]
+                second_memory = memory_candidates[second_number - 1]
+            except (ValueError, IndexError):
+                print("Invalid memory number.")
+                continue
+            score = cosine_similarity(
+                first_memory.embedding,
+                second_memory.embedding,
+            )
+            print("\n--- Memory Similarity ---")
+            print("Memory 1:", first_memory.content)
+            print("Memory 2:", second_memory.content)
+            print("Cosine similarity:", round(score, 4))
+            print("-------------------------")
+            continue
         if command == "status":
             print("\n--- Short-term Memory Status ---")
             for name, value in memory.get_status().items():
                 print(f"{name}: {value}")
             print("Memory candidates:", len(memory_candidates))
+            print("Embedding model:", EMBEDDING_MODEL)
             print("--------------------------------")
             continue
         if command == "remember":
@@ -336,11 +430,18 @@ def main() -> None:
                 print("Usage: remember <text>")
                 continue
             candidate = MemoryCandidate(content=candidate_text)
-            memory_candidates.append(candidate)
-            print("Saved as Memory Candidate:", candidate.content)
+            last_extraction_output = candidate.model_dump_json(indent=2)
+            try:
+                new_embedded_candidates, embedding_tokens = embed_memory_candidates(
+                    client,
+                    [candidate],
+                )
+                memory_candidates.extend(new_embedded_candidates)
+                memory.add_token_usage(embedding_tokens)
+            except Exception as error:
+                embedding_error = str(error)
             user_input = candidate_text
             should_auto_extract = False
-            last_extraction_output = candidate.model_dump_json(indent=2)
 
         memory.add_user_message(user_input)
         try:
@@ -363,7 +464,6 @@ def main() -> None:
         )
 
         extracted_candidates: list[MemoryCandidate] = []
-        extraction_tokens = 0
         if should_auto_extract:
             try:
                 extraction_result, extraction_tokens = extract_memory_candidates(
@@ -373,17 +473,30 @@ def main() -> None:
                 last_extraction_output = extraction_result.model_dump_json(indent=2)
                 if extraction_result.should_remember:
                     extracted_candidates = extraction_result.memories
-                    memory_candidates.extend(extracted_candidates)
                 memory.add_token_usage(extraction_tokens)
             except Exception as error:
                 last_extraction_output = f"Extraction failed: {error}"
 
-        print("Memora:", assistant_reply)
         if extracted_candidates:
-            print("\n--- New Memory Candidates ---")
-            for candidate in extracted_candidates:
+            try:
+                new_embedded_candidates, embedding_tokens = embed_memory_candidates(
+                    client,
+                    extracted_candidates,
+                )
+                memory_candidates.extend(new_embedded_candidates)
+                memory.add_token_usage(embedding_tokens)
+            except Exception as error:
+                embedding_error = str(error)
+
+        print("Memora:", assistant_reply)
+        if new_embedded_candidates:
+            print("\n--- New Embedded Memories ---")
+            for candidate in new_embedded_candidates:
                 print("-", candidate.content)
+                print("  Dimensions:", len(candidate.embedding))
             print("-----------------------------")
+        if embedding_error:
+            print("\nEmbedding failed:", embedding_error)
         print("\n--- Memory Status ---")
         print("Newly summarized messages:", memory_stats["newly_summarized_count"])
         print("Context messages sent:", len(memory_stats["context_messages"]))
@@ -392,6 +505,7 @@ def main() -> None:
         print("Output tokens:", response.usage.output_tokens)
         print("Summary update tokens:", memory_stats["summary_token_usage"])
         print("Memory extraction tokens:", extraction_tokens)
+        print("Embedding input tokens:", embedding_tokens)
         print("Memory candidates:", len(memory_candidates))
         print("Session total tokens:", memory.session_total_tokens)
         print("---------------------")
