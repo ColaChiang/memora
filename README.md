@@ -50,6 +50,7 @@ Agentic Memory
 - Day 13：完成 `Memora v0.10`，以 Pydantic Schema 與 Structured Output 取得穩定、可驗證的記憶資料。
 - Day 14：完成 `Memora v0.11`，替 Memory Candidate 建立 Embedding，並可查看向量與比較 Cosine Similarity。
 - Day 15：完成 `Memora v0.12`，不用 Vector Database，先以 Cosine Similarity 實作 Top-K Semantic Search。
+- Day 16：完成 `Memora v0.13`，改用 Chroma 儲存 Embedding、Metadata，並以 Cosine Distance 執行搜尋。
 
 ## 執行方式
 
@@ -84,3 +85,4 @@ python chatbot.py
 - [Day 13｜Structured Output：把 Memory 變成真正可以存的資料](https://ithelp.ithome.com.tw/articles/10407432)
 - [Day 14｜Embedding：AI 怎麼知道兩段記憶「很像」？](https://ithelp.ithome.com.tw/articles/10407783)
 - [Day 15｜不用 Vector Database，自己實作一次 Semantic Search](https://ithelp.ithome.com.tw/articles/10407997)
+- [Day 16｜Vector Database 到底在做什麼？](https://ithelp.ithome.com.tw/articles/10408000)

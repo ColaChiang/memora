@@ -79,6 +79,44 @@ class FakeEmbeddings:
         )
 
 
+class FakeCollection:
+    def __init__(self) -> None:
+        self.records: list[dict[str, object]] = []
+
+    def add(self, *, ids, documents, embeddings, metadatas) -> None:
+        self.records.extend(
+            {
+                "id": memory_id,
+                "document": document,
+                "embedding": embedding,
+                "metadata": metadata,
+            }
+            for memory_id, document, embedding, metadata in zip(
+                ids, documents, embeddings, metadatas
+            )
+        )
+
+    def count(self) -> int:
+        return len(self.records)
+
+    def get(self, *, include) -> dict[str, object]:
+        return {
+            "ids": [record["id"] for record in self.records],
+            "documents": [record["document"] for record in self.records],
+            "metadatas": [record["metadata"] for record in self.records],
+        }
+
+    def query(self, *, query_embeddings, n_results, include) -> dict[str, object]:
+        records = self.records[:n_results]
+        distances = [0.1 + index * 0.5 for index, _ in enumerate(records)]
+        return {
+            "ids": [[record["id"] for record in records]],
+            "documents": [[record["document"] for record in records]],
+            "metadatas": [[record["metadata"] for record in records]],
+            "distances": [distances],
+        }
+
+
 class ChatbotTest(unittest.TestCase):
     def test_history_is_sent_on_the_next_request(self) -> None:
         client = FakeClient()
@@ -94,6 +132,7 @@ class ChatbotTest(unittest.TestCase):
 
         with (
             patch.object(chatbot, "OpenAI", return_value=client),
+            patch.object(chatbot, "create_memory_collection", return_value=FakeCollection()),
             patch.object(builtins, "input", side_effect=lambda _="": next(inputs)),
             contextlib.redirect_stdout(output),
         ):
@@ -152,13 +191,14 @@ class ChatbotTest(unittest.TestCase):
 
         with (
             patch.object(chatbot, "OpenAI", return_value=client),
+            patch.object(chatbot, "create_memory_collection", return_value=FakeCollection()),
             patch.object(builtins, "input", side_effect=lambda _="": next(inputs)),
             contextlib.redirect_stdout(output),
         ):
             chatbot.main()
 
         self.assertIn("New Embedded Memories", output.getvalue())
-        self.assertIn("1. 我的英文程度是 B1。", output.getvalue())
+        self.assertIn("[manual] 我的英文程度是 B1。", output.getvalue())
 
     def test_extracts_structured_memory_candidates(self) -> None:
         client = FakeClient()
@@ -193,10 +233,6 @@ class ChatbotTest(unittest.TestCase):
         self.assertEqual([item.content for item in embedded], ["first", "second"])
         self.assertEqual(embedded[1].embedding, [1.0, 1.0])
         self.assertEqual(tokens, 6)
-        self.assertAlmostEqual(
-            chatbot.cosine_similarity([1.0, 0.0], [1.0, 0.0]),
-            1.0,
-        )
 
     def test_semantic_search_returns_highest_score_first(self) -> None:
         client = FakeClient()
@@ -210,11 +246,19 @@ class ChatbotTest(unittest.TestCase):
                 embedding=[0.0, 1.0],
             ),
         ]
+        collection = FakeCollection()
+        memory_ids = chatbot.add_memories_to_collection(
+            collection,
+            memories,
+            source="automatic",
+        )
 
-        results, tokens = chatbot.semantic_search(client, "airport", memories)
+        results, tokens = chatbot.semantic_search(client, "airport", collection)
 
         self.assertEqual(results[0].content, "travel English")
         self.assertGreater(results[0].score, results[1].score)
+        self.assertEqual(results[0].memory_id, memory_ids[0])
+        self.assertEqual(results[0].source, "automatic")
         self.assertEqual(tokens, 3)
 
 

@@ -1,6 +1,11 @@
-"""Memora v0.12: search in-memory candidates by semantic similarity."""
+"""Memora v0.13: store and search memory vectors with Chroma."""
 
-from math import sqrt
+from uuid import uuid4
+
+try:
+    import chromadb
+except ModuleNotFoundError:  # Keep the module importable before dependencies are installed.
+    chromadb = None
 from openai import OpenAI
 from pydantic import BaseModel, Field
 
@@ -98,8 +103,10 @@ class EmbeddedMemoryCandidate(BaseModel):
 
 
 class MemorySearchResult(BaseModel):
-    memory_number: int
+    memory_id: str
     content: str
+    source: str
+    distance: float
     score: float
 
 
@@ -154,41 +161,71 @@ def embed_memory_candidates(
     return embedded, embedding_tokens
 
 
-def cosine_similarity(vector_a: list[float], vector_b: list[float]) -> float:
-    if len(vector_a) != len(vector_b):
-        raise ValueError("兩個 Vector 的 Dimension 不一致。")
-    dot_product = sum(a * b for a, b in zip(vector_a, vector_b))
-    magnitude_a = sqrt(sum(value * value for value in vector_a))
-    magnitude_b = sqrt(sum(value * value for value in vector_b))
-    if magnitude_a == 0 or magnitude_b == 0:
-        return 0.0
-    return dot_product / (magnitude_a * magnitude_b)
+def create_memory_collection() -> object:
+    if chromadb is None:
+        raise RuntimeError("請先執行 pip install -r requirements.txt 安裝 chromadb。")
+    chroma_client = chromadb.EphemeralClient()
+    return chroma_client.get_or_create_collection(
+        name="memora_memories",
+        embedding_function=None,
+        configuration={"hnsw": {"space": "cosine"}},
+    )
+
+
+def add_memories_to_collection(
+    collection: object,
+    memories: list[EmbeddedMemoryCandidate],
+    source: str,
+) -> list[str]:
+    if not memories:
+        return []
+
+    memory_ids = [str(uuid4()) for _ in memories]
+    collection.add(
+        ids=memory_ids,
+        documents=[memory.content for memory in memories],
+        embeddings=[memory.embedding for memory in memories],
+        metadatas=[{"source": source} for _ in memories],
+    )
+    return memory_ids
 
 
 def semantic_search(
     client: OpenAI,
     query: str,
-    memories: list[EmbeddedMemoryCandidate],
+    collection: object,
     top_k: int = SEARCH_TOP_K,
 ) -> tuple[list[MemorySearchResult], int]:
     query = query.strip()
     if not query:
         raise ValueError("Search query cannot be empty.")
-    if not memories:
+    if collection.count() == 0:
         return [], 0
 
     query_vectors, embedding_tokens = create_embeddings(client, [query])
-    query_embedding = query_vectors[0]
-    results = [
-        MemorySearchResult(
-            memory_number=index,
-            content=memory.content,
-            score=cosine_similarity(query_embedding, memory.embedding),
+    query_result = collection.query(
+        query_embeddings=[query_vectors[0]],
+        n_results=min(top_k, collection.count()),
+        include=["documents", "metadatas", "distances"],
+    )
+
+    results = []
+    for memory_id, content, metadata, distance in zip(
+        query_result["ids"][0],
+        query_result["documents"][0],
+        query_result["metadatas"][0],
+        query_result["distances"][0],
+    ):
+        results.append(
+            MemorySearchResult(
+                memory_id=memory_id,
+                content=content,
+                source=metadata.get("source", "unknown"),
+                distance=distance,
+                score=1 - distance,
+            )
         )
-        for index, memory in enumerate(memories, start=1)
-    ]
-    results.sort(key=lambda result: result.score, reverse=True)
-    return results[:top_k], embedding_tokens
+    return results, embedding_tokens
 
 
 class ShortTermMemory:
@@ -361,14 +398,13 @@ def print_messages(title: str, messages: list[dict[str, str]]) -> None:
 def main() -> None:
     client = OpenAI()
     memory = ShortTermMemory(client=client)
-    memory_candidates: list[EmbeddedMemoryCandidate] = []
+    memory_collection = create_memory_collection()
     last_extraction_output = ""
 
-    print("Memora v0.12")
+    print("Memora v0.13")
     print(
         "Commands: history, context, summary, status, "
-        "remember <text>, memories, extraction, vector <number>, "
-        "similarity <a> <b>, search <query>, exit"
+        "remember <text>, memories, extraction, search <query>, exit"
     )
 
     while True:
@@ -398,64 +434,21 @@ def main() -> None:
             continue
         if command == "memories":
             print("\n--- Memory Candidates ---")
-            if not memory_candidates:
+            stored = memory_collection.get(include=["documents", "metadatas"])
+            if not stored["ids"]:
                 print("(empty)")
             else:
-                for index, candidate in enumerate(memory_candidates, start=1):
-                    print(
-                        f"{index}. {candidate.content} "
-                        f"({len(candidate.embedding)} dimensions)"
-                    )
+                for memory_id, content, metadata in zip(
+                    stored["ids"], stored["documents"], stored["metadatas"]
+                ):
+                    print(f"- [{metadata.get('source', 'unknown')}] {content}")
+                    print(f"  ID: {memory_id}")
             print("-------------------------")
             continue
         if command == "extraction":
             print("\n--- Last Extraction Output ---")
             print(last_extraction_output or "(not run)")
             print("------------------------------")
-            continue
-        if command == "vector":
-            print("Usage: vector <memory number>")
-            continue
-        if command.startswith("vector "):
-            try:
-                memory_number = int(command.split()[1])
-                if memory_number < 1:
-                    raise IndexError
-                candidate = memory_candidates[memory_number - 1]
-            except (ValueError, IndexError):
-                print("Invalid memory number.")
-                continue
-            print("\n--- Embedding Vector ---")
-            print("Content:", candidate.content)
-            print("Model:", EMBEDDING_MODEL)
-            print("Dimensions:", len(candidate.embedding))
-            print("Preview:", [round(value, 6) for value in candidate.embedding[:8]])
-            print("------------------------")
-            continue
-        if command == "similarity":
-            print("Usage: similarity <memory number 1> <memory number 2>")
-            continue
-        if command.startswith("similarity "):
-            try:
-                parts = command.split()
-                first_number = int(parts[1])
-                second_number = int(parts[2])
-                if first_number < 1 or second_number < 1:
-                    raise IndexError
-                first_memory = memory_candidates[first_number - 1]
-                second_memory = memory_candidates[second_number - 1]
-            except (ValueError, IndexError):
-                print("Invalid memory number.")
-                continue
-            score = cosine_similarity(
-                first_memory.embedding,
-                second_memory.embedding,
-            )
-            print("\n--- Memory Similarity ---")
-            print("Memory 1:", first_memory.content)
-            print("Memory 2:", second_memory.content)
-            print("Cosine similarity:", round(score, 4))
-            print("-------------------------")
             continue
         if command == "search":
             print("Usage: search <query>")
@@ -466,7 +459,7 @@ def main() -> None:
                 search_results, search_tokens = semantic_search(
                     client,
                     query,
-                    memory_candidates,
+                    memory_collection,
                 )
                 memory.add_token_usage(search_tokens)
             except Exception as error:
@@ -478,14 +471,14 @@ def main() -> None:
                 print("(no memories)")
             for rank, result in enumerate(search_results, start=1):
                 print(f"{rank}. [{result.score:.4f}] {result.content}")
-                print(f"   Memory #{result.memory_number}")
+                print(f"   Source: {result.source}; ID: {result.memory_id}")
             print("--------------------------------")
             continue
         if command == "status":
             print("\n--- Short-term Memory Status ---")
             for name, value in memory.get_status().items():
                 print(f"{name}: {value}")
-            print("Memory candidates:", len(memory_candidates))
+            print("Memory candidates:", memory_collection.count())
             print("Embedding model:", EMBEDDING_MODEL)
             print("--------------------------------")
             continue
@@ -504,12 +497,21 @@ def main() -> None:
                     client,
                     [candidate],
                 )
-                memory_candidates.extend(new_embedded_candidates)
+                memory_ids = add_memories_to_collection(
+                    memory_collection,
+                    new_embedded_candidates,
+                    source="manual",
+                )
                 memory.add_token_usage(embedding_tokens)
             except Exception as error:
                 embedding_error = str(error)
-            user_input = candidate_text
-            should_auto_extract = False
+                print("Embedding failed:", embedding_error)
+                continue
+            print("\n--- New Embedded Memories ---")
+            print("-", candidate.content)
+            print("  ID:", memory_ids[0])
+            print("-----------------------------")
+            continue
 
         memory.add_user_message(user_input)
         try:
@@ -551,7 +553,11 @@ def main() -> None:
                     client,
                     extracted_candidates,
                 )
-                memory_candidates.extend(new_embedded_candidates)
+                add_memories_to_collection(
+                    memory_collection,
+                    new_embedded_candidates,
+                    source="automatic",
+                )
                 memory.add_token_usage(embedding_tokens)
             except Exception as error:
                 embedding_error = str(error)
@@ -574,7 +580,7 @@ def main() -> None:
         print("Summary update tokens:", memory_stats["summary_token_usage"])
         print("Memory extraction tokens:", extraction_tokens)
         print("Embedding input tokens:", embedding_tokens)
-        print("Memory candidates:", len(memory_candidates))
+        print("Memory candidates:", memory_collection.count())
         print("Session total tokens:", memory.session_total_tokens)
         print("---------------------")
 
