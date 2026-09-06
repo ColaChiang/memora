@@ -1,4 +1,4 @@
-"""Memora v0.11: represent memory candidates with embedding vectors."""
+"""Memora v0.12: search in-memory candidates by semantic similarity."""
 
 from math import sqrt
 from openai import OpenAI
@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 
 MODEL = "gpt-5-mini"
 EMBEDDING_MODEL = "text-embedding-3-small"
+SEARCH_TOP_K = 3
 MAX_INPUT_TOKENS = 1000
 MAX_RECENT_TURNS = 3
 
@@ -96,6 +97,12 @@ class EmbeddedMemoryCandidate(BaseModel):
     embedding: list[float]
 
 
+class MemorySearchResult(BaseModel):
+    memory_number: int
+    content: str
+    score: float
+
+
 def extract_memory_candidates(
     client: OpenAI,
     user_input: str,
@@ -113,27 +120,38 @@ def extract_memory_candidates(
     return response.output_parsed, response.usage.total_tokens
 
 
-def embed_memory_candidates(
+def create_embeddings(
     client: OpenAI,
-    candidates: list[MemoryCandidate],
-) -> tuple[list[EmbeddedMemoryCandidate], int]:
-    if not candidates:
+    texts: list[str],
+) -> tuple[list[list[float]], int]:
+    if not texts:
         return [], 0
 
     response = client.embeddings.create(
         model=EMBEDDING_MODEL,
-        input=[candidate.content for candidate in candidates],
+        input=texts,
         encoding_format="float",
     )
     embedding_data = sorted(response.data, key=lambda item: item.index)
+    return [item.embedding for item in embedding_data], response.usage.total_tokens
+
+
+def embed_memory_candidates(
+    client: OpenAI,
+    candidates: list[MemoryCandidate],
+) -> tuple[list[EmbeddedMemoryCandidate], int]:
+    vectors, embedding_tokens = create_embeddings(
+        client,
+        [candidate.content for candidate in candidates],
+    )
     embedded = [
         EmbeddedMemoryCandidate(
             content=candidate.content,
-            embedding=data.embedding,
+            embedding=vector,
         )
-        for candidate, data in zip(candidates, embedding_data)
+        for candidate, vector in zip(candidates, vectors)
     ]
-    return embedded, response.usage.total_tokens
+    return embedded, embedding_tokens
 
 
 def cosine_similarity(vector_a: list[float], vector_b: list[float]) -> float:
@@ -145,6 +163,32 @@ def cosine_similarity(vector_a: list[float], vector_b: list[float]) -> float:
     if magnitude_a == 0 or magnitude_b == 0:
         return 0.0
     return dot_product / (magnitude_a * magnitude_b)
+
+
+def semantic_search(
+    client: OpenAI,
+    query: str,
+    memories: list[EmbeddedMemoryCandidate],
+    top_k: int = SEARCH_TOP_K,
+) -> tuple[list[MemorySearchResult], int]:
+    query = query.strip()
+    if not query:
+        raise ValueError("Search query cannot be empty.")
+    if not memories:
+        return [], 0
+
+    query_vectors, embedding_tokens = create_embeddings(client, [query])
+    query_embedding = query_vectors[0]
+    results = [
+        MemorySearchResult(
+            memory_number=index,
+            content=memory.content,
+            score=cosine_similarity(query_embedding, memory.embedding),
+        )
+        for index, memory in enumerate(memories, start=1)
+    ]
+    results.sort(key=lambda result: result.score, reverse=True)
+    return results[:top_k], embedding_tokens
 
 
 class ShortTermMemory:
@@ -320,11 +364,11 @@ def main() -> None:
     memory_candidates: list[EmbeddedMemoryCandidate] = []
     last_extraction_output = ""
 
-    print("Memora v0.11")
+    print("Memora v0.12")
     print(
         "Commands: history, context, summary, status, "
         "remember <text>, memories, extraction, vector <number>, "
-        "similarity <a> <b>, exit"
+        "similarity <a> <b>, search <query>, exit"
     )
 
     while True:
@@ -412,6 +456,30 @@ def main() -> None:
             print("Memory 2:", second_memory.content)
             print("Cosine similarity:", round(score, 4))
             print("-------------------------")
+            continue
+        if command == "search":
+            print("Usage: search <query>")
+            continue
+        if command.startswith("search "):
+            query = user_input[len("search ") :].strip()
+            try:
+                search_results, search_tokens = semantic_search(
+                    client,
+                    query,
+                    memory_candidates,
+                )
+                memory.add_token_usage(search_tokens)
+            except Exception as error:
+                print("Search failed:", error)
+                continue
+
+            print(f"\n--- Semantic Search: {query} ---")
+            if not search_results:
+                print("(no memories)")
+            for rank, result in enumerate(search_results, start=1):
+                print(f"{rank}. [{result.score:.4f}] {result.content}")
+                print(f"   Memory #{result.memory_number}")
+            print("--------------------------------")
             continue
         if command == "status":
             print("\n--- Short-term Memory Status ---")

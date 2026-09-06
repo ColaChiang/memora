@@ -198,6 +198,25 @@ class ChatbotTest(unittest.TestCase):
             1.0,
         )
 
+    def test_semantic_search_returns_highest_score_first(self) -> None:
+        client = FakeClient()
+        memories = [
+            chatbot.EmbeddedMemoryCandidate(
+                content="travel English",
+                embedding=[1.0, 0.0],
+            ),
+            chatbot.EmbeddedMemoryCandidate(
+                content="grammar book",
+                embedding=[0.0, 1.0],
+            ),
+        ]
+
+        results, tokens = chatbot.semantic_search(client, "airport", memories)
+
+        self.assertEqual(results[0].content, "travel English")
+        self.assertGreater(results[0].score, results[1].score)
+        self.assertEqual(tokens, 3)
+
 
 if __name__ == "__main__":
     unittest.main()
