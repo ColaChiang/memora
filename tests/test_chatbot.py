@@ -132,7 +132,11 @@ class ChatbotTest(unittest.TestCase):
 
         with (
             patch.object(chatbot, "OpenAI", return_value=client),
-            patch.object(chatbot, "create_memory_collection", return_value=FakeCollection()),
+            patch.object(
+                chatbot,
+                "create_long_term_memory_store",
+                return_value=chatbot.LongTermMemoryStore("", "", FakeCollection()),
+            ),
             patch.object(builtins, "input", side_effect=lambda _="": next(inputs)),
             contextlib.redirect_stdout(output),
         ):
@@ -191,14 +195,19 @@ class ChatbotTest(unittest.TestCase):
 
         with (
             patch.object(chatbot, "OpenAI", return_value=client),
-            patch.object(chatbot, "create_memory_collection", return_value=FakeCollection()),
+            patch.object(
+                chatbot,
+                "create_long_term_memory_store",
+                return_value=chatbot.LongTermMemoryStore("", "", FakeCollection()),
+            ),
             patch.object(builtins, "input", side_effect=lambda _="": next(inputs)),
             contextlib.redirect_stdout(output),
         ):
             chatbot.main()
 
         self.assertIn("New Embedded Memories", output.getvalue())
-        self.assertIn("[manual] 我的英文程度是 B1。", output.getvalue())
+        self.assertIn("1. 我的英文程度是 B1。", output.getvalue())
+        self.assertIn("Source: manual", output.getvalue())
 
     def test_extracts_structured_memory_candidates(self) -> None:
         client = FakeClient()
@@ -246,20 +255,33 @@ class ChatbotTest(unittest.TestCase):
                 embedding=[0.0, 1.0],
             ),
         ]
-        collection = FakeCollection()
-        memory_ids = chatbot.add_memories_to_collection(
-            collection,
+        store = chatbot.LongTermMemoryStore("", "", FakeCollection())
+        memory_ids = store.add(
             memories,
             source="automatic",
         )
 
-        results, tokens = chatbot.semantic_search(client, "airport", collection)
+        results, tokens = chatbot.semantic_search(client, "airport", store)
 
         self.assertEqual(results[0].content, "travel English")
         self.assertGreater(results[0].score, results[1].score)
         self.assertEqual(results[0].memory_id, memory_ids[0])
         self.assertEqual(results[0].source, "automatic")
+        self.assertNotEqual(results[0].created_at, "unknown")
         self.assertEqual(tokens, 3)
+
+    def test_long_term_store_lists_saved_memories(self) -> None:
+        store = chatbot.LongTermMemoryStore("", "", FakeCollection())
+        store.add(
+            [chatbot.EmbeddedMemoryCandidate(content="使用者程度是 B1。", embedding=[1.0])],
+            source="manual",
+        )
+
+        stored_memories = store.list_all()
+
+        self.assertEqual(store.count(), 1)
+        self.assertEqual(stored_memories[0].content, "使用者程度是 B1。")
+        self.assertEqual(stored_memories[0].source, "manual")
 
 
 if __name__ == "__main__":

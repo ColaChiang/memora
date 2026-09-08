@@ -1,5 +1,7 @@
-"""Memora v0.13: store and search memory vectors with Chroma."""
+"""Memora v0.14: persist long-term memory across program restarts."""
 
+from datetime import datetime, timezone
+from pathlib import Path
 from uuid import uuid4
 
 try:
@@ -15,6 +17,8 @@ EMBEDDING_MODEL = "text-embedding-3-small"
 SEARCH_TOP_K = 3
 MAX_INPUT_TOKENS = 1000
 MAX_RECENT_TURNS = 3
+BASE_DIR = Path(__file__).resolve().parent
+MEMORY_DB_PATH = BASE_DIR / "memora_db"
 
 SYSTEM_PROMPT = """
 You are Memora, a personal English learning assistant.
@@ -106,8 +110,16 @@ class MemorySearchResult(BaseModel):
     memory_id: str
     content: str
     source: str
+    created_at: str
     distance: float
     score: float
+
+
+class StoredMemory(BaseModel):
+    memory_id: str
+    content: str
+    source: str
+    created_at: str
 
 
 def extract_memory_candidates(
@@ -161,71 +173,131 @@ def embed_memory_candidates(
     return embedded, embedding_tokens
 
 
-def create_memory_collection() -> object:
-    if chromadb is None:
-        raise RuntimeError("請先執行 pip install -r requirements.txt 安裝 chromadb。")
-    chroma_client = chromadb.EphemeralClient()
-    return chroma_client.get_or_create_collection(
-        name="memora_memories",
-        embedding_function=None,
-        configuration={"hnsw": {"space": "cosine"}},
+class LongTermMemoryStore:
+    def __init__(
+        self,
+        path: str,
+        collection_name: str,
+        collection: object | None = None,
+    ) -> None:
+        if collection is not None:
+            self.client = None
+            self.collection = collection
+            return
+        if chromadb is None:
+            raise RuntimeError("請先執行 pip install -r requirements.txt 安裝 chromadb。")
+
+        self.client = chromadb.PersistentClient(path=path)
+        self.collection = self.client.get_or_create_collection(
+            name=collection_name,
+            embedding_function=None,
+            configuration={"hnsw": {"space": "cosine"}},
+            metadata={"embedding_model": EMBEDDING_MODEL},
+        )
+
+    def add(
+        self,
+        memories: list[EmbeddedMemoryCandidate],
+        source: str,
+    ) -> list[str]:
+        if not memories:
+            return []
+
+        memory_ids = [str(uuid4()) for _ in memories]
+        created_at = datetime.now(timezone.utc).isoformat()
+        self.collection.add(
+            ids=memory_ids,
+            documents=[memory.content for memory in memories],
+            embeddings=[memory.embedding for memory in memories],
+            metadatas=[
+                {"source": source, "created_at": created_at} for _ in memories
+            ],
+        )
+        return memory_ids
+
+    def list_all(self) -> list[StoredMemory]:
+        result = self.collection.get(include=["documents", "metadatas"])
+        stored_memories = []
+        for memory_id, document, metadata in zip(
+            result["ids"], result["documents"], result["metadatas"]
+        ):
+            metadata = metadata or {}
+            stored_memories.append(
+                StoredMemory(
+                    memory_id=memory_id,
+                    content=document,
+                    source=metadata.get("source", "unknown"),
+                    created_at=metadata.get("created_at", "unknown"),
+                )
+            )
+        stored_memories.sort(key=lambda item: item.created_at)
+        return stored_memories
+
+    def search(
+        self,
+        query_embedding: list[float],
+        top_k: int,
+    ) -> list[MemorySearchResult]:
+        total_memories = self.collection.count()
+        if total_memories == 0:
+            return []
+        if top_k <= 0:
+            raise ValueError("top_k must be greater than 0.")
+
+        result = self.collection.query(
+            query_embeddings=[query_embedding],
+            n_results=min(top_k, total_memories),
+            include=["documents", "metadatas", "distances"],
+        )
+        search_results = []
+        for memory_id, document, metadata, distance in zip(
+            result["ids"][0],
+            result["documents"][0],
+            result["metadatas"][0],
+            result["distances"][0],
+        ):
+            metadata = metadata or {}
+            search_results.append(
+                MemorySearchResult(
+                    memory_id=memory_id,
+                    content=document,
+                    source=metadata.get("source", "unknown"),
+                    created_at=metadata.get("created_at", "unknown"),
+                    distance=float(distance),
+                    score=1 - float(distance),
+                )
+            )
+        return search_results
+
+    def count(self) -> int:
+        return self.collection.count()
+
+
+def create_long_term_memory_store() -> LongTermMemoryStore:
+    return LongTermMemoryStore(
+        path=str(MEMORY_DB_PATH),
+        collection_name="memora_memories",
     )
-
-
-def add_memories_to_collection(
-    collection: object,
-    memories: list[EmbeddedMemoryCandidate],
-    source: str,
-) -> list[str]:
-    if not memories:
-        return []
-
-    memory_ids = [str(uuid4()) for _ in memories]
-    collection.add(
-        ids=memory_ids,
-        documents=[memory.content for memory in memories],
-        embeddings=[memory.embedding for memory in memories],
-        metadatas=[{"source": source} for _ in memories],
-    )
-    return memory_ids
 
 
 def semantic_search(
     client: OpenAI,
     query: str,
-    collection: object,
+    long_term_memory: LongTermMemoryStore,
     top_k: int = SEARCH_TOP_K,
 ) -> tuple[list[MemorySearchResult], int]:
     query = query.strip()
     if not query:
         raise ValueError("Search query cannot be empty.")
-    if collection.count() == 0:
+    if long_term_memory.count() == 0:
         return [], 0
 
     query_vectors, embedding_tokens = create_embeddings(client, [query])
-    query_result = collection.query(
-        query_embeddings=[query_vectors[0]],
-        n_results=min(top_k, collection.count()),
-        include=["documents", "metadatas", "distances"],
+    search_results = long_term_memory.search(
+        query_embedding=query_vectors[0],
+        top_k=top_k,
     )
-
-    results = []
-    for memory_id, content, metadata, distance in zip(
-        query_result["ids"][0],
-        query_result["documents"][0],
-        query_result["metadatas"][0],
-        query_result["distances"][0],
-    ):
-        results.append(
-            MemorySearchResult(
-                memory_id=memory_id,
-                content=content,
-                source=metadata.get("source", "unknown"),
-                distance=distance,
-                score=1 - distance,
-            )
-        )
-    return results, embedding_tokens
+    return search_results, embedding_tokens
 
 
 class ShortTermMemory:
@@ -398,10 +470,10 @@ def print_messages(title: str, messages: list[dict[str, str]]) -> None:
 def main() -> None:
     client = OpenAI()
     memory = ShortTermMemory(client=client)
-    memory_collection = create_memory_collection()
+    long_term_memory = create_long_term_memory_store()
     last_extraction_output = ""
 
-    print("Memora v0.13")
+    print("Memora v0.14")
     print(
         "Commands: history, context, summary, status, "
         "remember <text>, memories, extraction, search <query>, exit"
@@ -434,15 +506,15 @@ def main() -> None:
             continue
         if command == "memories":
             print("\n--- Memory Candidates ---")
-            stored = memory_collection.get(include=["documents", "metadatas"])
-            if not stored["ids"]:
-                print("(empty)")
+            stored_memories = long_term_memory.list_all()
+            if not stored_memories:
+                print("(no memories)")
             else:
-                for memory_id, content, metadata in zip(
-                    stored["ids"], stored["documents"], stored["metadatas"]
-                ):
-                    print(f"- [{metadata.get('source', 'unknown')}] {content}")
-                    print(f"  ID: {memory_id}")
+                for index, stored_memory in enumerate(stored_memories, start=1):
+                    print(f"{index}. {stored_memory.content}")
+                    print(f"   ID: {stored_memory.memory_id}")
+                    print(f"   Source: {stored_memory.source}")
+                    print(f"   Created at: {stored_memory.created_at}")
             print("-------------------------")
             continue
         if command == "extraction":
@@ -459,7 +531,7 @@ def main() -> None:
                 search_results, search_tokens = semantic_search(
                     client,
                     query,
-                    memory_collection,
+                    long_term_memory,
                 )
                 memory.add_token_usage(search_tokens)
             except Exception as error:
@@ -478,7 +550,7 @@ def main() -> None:
             print("\n--- Short-term Memory Status ---")
             for name, value in memory.get_status().items():
                 print(f"{name}: {value}")
-            print("Memory candidates:", memory_collection.count())
+            print("Long-term memories:", long_term_memory.count())
             print("Embedding model:", EMBEDDING_MODEL)
             print("--------------------------------")
             continue
@@ -497,8 +569,7 @@ def main() -> None:
                     client,
                     [candidate],
                 )
-                memory_ids = add_memories_to_collection(
-                    memory_collection,
+                memory_ids = long_term_memory.add(
                     new_embedded_candidates,
                     source="manual",
                 )
@@ -553,8 +624,7 @@ def main() -> None:
                     client,
                     extracted_candidates,
                 )
-                add_memories_to_collection(
-                    memory_collection,
+                long_term_memory.add(
                     new_embedded_candidates,
                     source="automatic",
                 )
@@ -580,7 +650,7 @@ def main() -> None:
         print("Summary update tokens:", memory_stats["summary_token_usage"])
         print("Memory extraction tokens:", extraction_tokens)
         print("Embedding input tokens:", embedding_tokens)
-        print("Memory candidates:", memory_collection.count())
+        print("Long-term memories:", long_term_memory.count())
         print("Session total tokens:", memory.session_total_tokens)
         print("---------------------")
 
