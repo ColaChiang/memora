@@ -283,6 +283,39 @@ class ChatbotTest(unittest.TestCase):
         self.assertEqual(stored_memories[0].content, "使用者程度是 B1。")
         self.assertEqual(stored_memories[0].source, "manual")
 
+    def test_retrieval_filters_low_scores_and_builds_background(self) -> None:
+        client = FakeClient()
+        store = chatbot.LongTermMemoryStore("", "", FakeCollection())
+        store.add(
+            [
+                chatbot.EmbeddedMemoryCandidate(content="使用者程度是 B1。", embedding=[1.0]),
+                chatbot.EmbeddedMemoryCandidate(content="曾問過現在完成式。", embedding=[0.0]),
+            ],
+            source="automatic",
+        )
+
+        memories, tokens = chatbot.retrieve_relevant_memories(
+            client,
+            store,
+            "請安排適合我的課程",
+        )
+        messages = chatbot.build_memory_messages(memories)
+
+        self.assertEqual(len(memories), 1)
+        self.assertEqual(tokens, 3)
+        self.assertEqual(messages[0]["role"], "developer")
+        self.assertIn("使用者程度是 B1。", messages[0]["content"])
+
+    def test_background_messages_are_included_in_token_budget(self) -> None:
+        memory = chatbot.ShortTermMemory(client=FakeClient())
+        memory.add_user_message("請安排課程")
+        background = [{"role": "developer", "content": "使用者程度是 B1。"}]
+
+        stats = memory.prepare_context(background_messages=background)
+
+        self.assertEqual(stats["context_messages"][0], background[0])
+        self.assertEqual(stats["input_tokens"], 20)
+
 
 if __name__ == "__main__":
     unittest.main()

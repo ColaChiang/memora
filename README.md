@@ -52,6 +52,7 @@ Agentic Memory
 - Day 15：完成 `Memora v0.12`，不用 Vector Database，先以 Cosine Similarity 實作 Top-K Semantic Search。
 - Day 16：完成 `Memora v0.13`，改用 Chroma 儲存 Embedding、Metadata，並以 Cosine Distance 執行搜尋。
 - Day 17：完成 `Memora v0.14`，用 Chroma PersistentClient 建立可跨程式保存的 `LongTermMemoryStore`。
+- Day 18：完成 `Memora v0.15`，在回答前自動檢索、篩選相關記憶，並把它納入 Context Token Budget。
 
 ## 執行方式
 
@@ -88,3 +89,4 @@ python chatbot.py
 - [Day 15｜不用 Vector Database，自己實作一次 Semantic Search](https://ithelp.ithome.com.tw/articles/10407997)
 - [Day 16｜Vector Database 到底在做什麼？](https://ithelp.ithome.com.tw/articles/10408000)
 - [Day 17｜打造第一個 Long-term Memory Store](https://ithelp.ithome.com.tw/articles/10408001)
+- [Day 18｜讓 AI 找回過去：Memory Retrieval](https://ithelp.ithome.com.tw/articles/10408560)
