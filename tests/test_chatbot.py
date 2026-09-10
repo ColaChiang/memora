@@ -196,7 +196,7 @@ class ChatbotTest(unittest.TestCase):
 
     def test_remember_command_saves_a_candidate(self) -> None:
         client = FakeClient()
-        inputs = iter(["remember 我的英文程度是 B1。", "memories", "exit"])
+        inputs = iter(["remember semantic 我的英文程度是 B1。", "memories", "exit"])
         output = StringIO()
 
         with (
@@ -225,8 +225,12 @@ class ChatbotTest(unittest.TestCase):
         client.responses.extraction_result = chatbot.MemoryExtractionResult(
             should_remember=True,
             memories=[
-                chatbot.MemoryCandidate(content="使用者的英文程度是 B1。"),
-                chatbot.MemoryCandidate(content="使用者想加強旅遊英文。"),
+                chatbot.MemoryCandidate(
+                    content="使用者的英文程度是 B1。", memory_type="semantic"
+                ),
+                chatbot.MemoryCandidate(
+                    content="使用者想加強旅遊英文。", memory_type="semantic"
+                ),
             ],
         )
 
@@ -245,12 +249,13 @@ class ChatbotTest(unittest.TestCase):
         embedded, tokens = chatbot.embed_memory_candidates(
             client,
             [
-                chatbot.MemoryCandidate(content="first"),
-                chatbot.MemoryCandidate(content="second"),
+                chatbot.MemoryCandidate(content="first", memory_type="semantic"),
+                chatbot.MemoryCandidate(content="second", memory_type="episodic"),
             ],
         )
 
         self.assertEqual([item.content for item in embedded], ["first", "second"])
+        self.assertEqual(embedded[1].memory_type, "episodic")
         self.assertEqual(embedded[1].embedding, [1.0, 1.0])
         self.assertEqual(tokens, 6)
 
@@ -259,10 +264,12 @@ class ChatbotTest(unittest.TestCase):
         memories = [
             chatbot.EmbeddedMemoryCandidate(
                 content="travel English",
+                memory_type="semantic",
                 embedding=[1.0, 0.0],
             ),
             chatbot.EmbeddedMemoryCandidate(
                 content="grammar book",
+                memory_type="episodic",
                 embedding=[0.0, 1.0],
             ),
         ]
@@ -278,13 +285,20 @@ class ChatbotTest(unittest.TestCase):
         self.assertGreater(results[0].score, results[1].score)
         self.assertEqual(results[0].memory_id, memory_ids[0])
         self.assertEqual(results[0].source, "automatic")
+        self.assertEqual(results[0].memory_type, "semantic")
         self.assertNotEqual(results[0].created_at, "unknown")
         self.assertEqual(tokens, 3)
 
     def test_long_term_store_lists_saved_memories(self) -> None:
         store = chatbot.LongTermMemoryStore("", "", FakeCollection())
         store.add(
-            [chatbot.EmbeddedMemoryCandidate(content="使用者程度是 B1。", embedding=[1.0])],
+            [
+                chatbot.EmbeddedMemoryCandidate(
+                    content="使用者程度是 B1。",
+                    memory_type="semantic",
+                    embedding=[1.0],
+                )
+            ],
             source="manual",
         )
 
@@ -293,14 +307,23 @@ class ChatbotTest(unittest.TestCase):
         self.assertEqual(store.count(), 1)
         self.assertEqual(stored_memories[0].content, "使用者程度是 B1。")
         self.assertEqual(stored_memories[0].source, "manual")
+        self.assertEqual(stored_memories[0].memory_type, "semantic")
 
     def test_retrieval_filters_low_scores_and_builds_background(self) -> None:
         client = FakeClient()
         store = chatbot.LongTermMemoryStore("", "", FakeCollection())
         store.add(
             [
-                chatbot.EmbeddedMemoryCandidate(content="使用者程度是 B1。", embedding=[1.0]),
-                chatbot.EmbeddedMemoryCandidate(content="曾問過現在完成式。", embedding=[0.0]),
+                chatbot.EmbeddedMemoryCandidate(
+                    content="使用者程度是 B1。",
+                    memory_type="semantic",
+                    embedding=[1.0],
+                ),
+                chatbot.EmbeddedMemoryCandidate(
+                    content="曾問過現在完成式。",
+                    memory_type="episodic",
+                    embedding=[0.0],
+                ),
             ],
             source="automatic",
         )
@@ -349,6 +372,7 @@ class ChatbotTest(unittest.TestCase):
         memory = chatbot.MemorySearchResult(
             memory_id="memory-1",
             content="昨天練習過機場報到。",
+            memory_type="episodic",
             source="automatic",
             created_at="2026-09-10T00:00:00+00:00",
             distance=0.1,
@@ -360,6 +384,19 @@ class ChatbotTest(unittest.TestCase):
         self.assertIn("<user_profile>", messages[0]["content"])
         self.assertIn("English level: B1", messages[0]["content"])
         self.assertIn("<long_term_memories>", messages[0]["content"])
+        self.assertIn("[episodic]", messages[0]["content"])
+
+    def test_old_memory_without_type_is_unclassified(self) -> None:
+        collection = FakeCollection()
+        collection.add(
+            ids=["legacy"],
+            documents=["舊記憶"],
+            embeddings=[[1.0]],
+            metadatas=[{"source": "automatic", "created_at": "unknown"}],
+        )
+        store = chatbot.LongTermMemoryStore("", "", collection)
+
+        self.assertEqual(store.list_all()[0].memory_type, "unclassified")
 
 
 if __name__ == "__main__":

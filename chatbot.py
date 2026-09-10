@@ -1,7 +1,8 @@
-"""Memora v0.16: combine a user profile with retrieved memories."""
+"""Memora v0.17: distinguish semantic and episodic memories."""
 
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal
 from uuid import uuid4
 
 try:
@@ -71,6 +72,26 @@ Do not extract:
 
 Rewrite each memory as a short, self-contained statement.
 
+For each extracted memory, choose one memory_type:
+
+- semantic:
+  A fact, preference, goal, ability, or general observation
+  that can be useful without referring to one specific event.
+
+- episodic:
+  A specific past interaction, activity, event, or result.
+
+Use only "semantic" or "episodic".
+Do not classify a memory only by keywords such as "yesterday" or "last week".
+Classify the meaning that the memory preserves.
+
+Examples:
+- "The user's English level is B1." -> semantic
+- "The user prefers short examples." -> semantic
+- "The user completed an airport check-in exercise yesterday." -> episodic
+- "The user answered three present-perfect questions incorrectly in the
+  previous practice session." -> episodic
+
 If the message contains useful information:
 - Set should_remember to true.
 - Add each independent memory to memories.
@@ -83,6 +104,10 @@ Do not invent information that the user did not state.
 """.strip()
 
 
+ExtractedMemoryType = Literal["semantic", "episodic"]
+StoredMemoryType = Literal["semantic", "episodic", "unclassified"]
+
+
 class MemoryCandidate(BaseModel):
     content: str = Field(
         description=(
@@ -90,6 +115,7 @@ class MemoryCandidate(BaseModel):
             "in future conversations."
         )
     )
+    memory_type: ExtractedMemoryType
 
 
 class MemoryExtractionResult(BaseModel):
@@ -106,12 +132,14 @@ class MemoryExtractionResult(BaseModel):
 
 class EmbeddedMemoryCandidate(BaseModel):
     content: str
+    memory_type: ExtractedMemoryType
     embedding: list[float]
 
 
 class MemorySearchResult(BaseModel):
     memory_id: str
     content: str
+    memory_type: StoredMemoryType
     source: str
     created_at: str
     distance: float
@@ -121,6 +149,7 @@ class MemorySearchResult(BaseModel):
 class StoredMemory(BaseModel):
     memory_id: str
     content: str
+    memory_type: StoredMemoryType
     source: str
     created_at: str
 
@@ -211,6 +240,7 @@ def embed_memory_candidates(
     embedded = [
         EmbeddedMemoryCandidate(
             content=candidate.content,
+            memory_type=candidate.memory_type,
             embedding=vector,
         )
         for candidate, vector in zip(candidates, vectors)
@@ -255,7 +285,12 @@ class LongTermMemoryStore:
             documents=[memory.content for memory in memories],
             embeddings=[memory.embedding for memory in memories],
             metadatas=[
-                {"source": source, "created_at": created_at} for _ in memories
+                {
+                    "source": source,
+                    "created_at": created_at,
+                    "memory_type": memory.memory_type,
+                }
+                for memory in memories
             ],
         )
         return memory_ids
@@ -271,6 +306,7 @@ class LongTermMemoryStore:
                 StoredMemory(
                     memory_id=memory_id,
                     content=document,
+                    memory_type=read_memory_type(metadata),
                     source=metadata.get("source", "unknown"),
                     created_at=metadata.get("created_at", "unknown"),
                 )
@@ -306,6 +342,7 @@ class LongTermMemoryStore:
                 MemorySearchResult(
                     memory_id=memory_id,
                     content=document,
+                    memory_type=read_memory_type(metadata),
                     source=metadata.get("source", "unknown"),
                     created_at=metadata.get("created_at", "unknown"),
                     distance=float(distance),
@@ -316,6 +353,13 @@ class LongTermMemoryStore:
 
     def count(self) -> int:
         return self.collection.count()
+
+
+def read_memory_type(metadata: dict[str, object]) -> StoredMemoryType:
+    memory_type = metadata.get("memory_type")
+    if memory_type in {"semantic", "episodic"}:
+        return memory_type
+    return "unclassified"
 
 
 def create_long_term_memory_store() -> LongTermMemoryStore:
@@ -380,7 +424,9 @@ def build_profile_context(profile: UserProfile) -> str:
 def build_memory_context(
     memories: list[MemorySearchResult],
 ) -> str:
-    return "\n".join(f"- {memory.content}" for memory in memories)
+    return "\n".join(
+        f"- [{memory.memory_type}] {memory.content}" for memory in memories
+    )
 
 
 def build_background_messages(
@@ -638,10 +684,11 @@ def main() -> None:
     user_profile_store = create_user_profile_store()
     last_extraction_output = ""
 
-    print("Memora v0.16")
+    print("Memora v0.17")
     print(
         "Commands: history, context, summary, status, "
-        "remember <text>, memories, extraction, search <query>, profile, exit"
+        "remember <semantic|episodic> <text>, memories, extraction, "
+        "search <query>, profile, exit"
     )
 
     while True:
@@ -682,6 +729,7 @@ def main() -> None:
                 for index, stored_memory in enumerate(stored_memories, start=1):
                     print(f"{index}. {stored_memory.content}")
                     print(f"   ID: {stored_memory.memory_id}")
+                    print(f"   Type: {stored_memory.memory_type}")
                     print(f"   Source: {stored_memory.source}")
                     print(f"   Created at: {stored_memory.created_at}")
             print("-------------------------")
@@ -712,6 +760,7 @@ def main() -> None:
                 print("(no memories)")
             for rank, result in enumerate(search_results, start=1):
                 print(f"{rank}. [{result.score:.4f}] {result.content}")
+                print(f"   Type: {result.memory_type}")
                 print(f"   Source: {result.source}; ID: {result.memory_id}")
             print("--------------------------------")
             continue
@@ -724,14 +773,23 @@ def main() -> None:
             print("--------------------------------")
             continue
         if command == "remember":
-            print("Usage: remember <text>")
+            print("Usage: remember <semantic|episodic> <memory>")
             continue
         if command.startswith("remember "):
-            candidate_text = user_input[len("remember ") :].strip()
-            if not candidate_text:
-                print("Usage: remember <text>")
+            command_value = user_input[len("remember ") :]
+            remember_parts = command_value.strip().split(maxsplit=1)
+            if (
+                len(remember_parts) != 2
+                or remember_parts[0].lower() not in {"semantic", "episodic"}
+            ):
+                print("Usage: remember <semantic|episodic> <memory>")
                 continue
-            candidate = MemoryCandidate(content=candidate_text)
+            memory_type = remember_parts[0].lower()
+            candidate_text = remember_parts[1].strip()
+            candidate = MemoryCandidate(
+                content=candidate_text,
+                memory_type=memory_type,
+            )
             last_extraction_output = candidate.model_dump_json(indent=2)
             try:
                 new_embedded_candidates, embedding_tokens = embed_memory_candidates(
@@ -749,6 +807,7 @@ def main() -> None:
                 continue
             print("\n--- New Embedded Memories ---")
             print("-", candidate.content)
+            print("  Type:", candidate.memory_type)
             print("  ID:", memory_ids[0])
             print("-----------------------------")
             continue
@@ -822,11 +881,13 @@ def main() -> None:
         else:
             for rank, result in enumerate(retrieved_memories, start=1):
                 print(f"{rank}. [{result.score:.4f}] {result.content}")
+                print(f"   Type: {result.memory_type}")
         print("--------------------------")
         if new_embedded_candidates:
             print("\n--- New Embedded Memories ---")
             for candidate in new_embedded_candidates:
                 print("-", candidate.content)
+                print("  Type:", candidate.memory_type)
                 print("  Dimensions:", len(candidate.embedding))
             print("-----------------------------")
         if embedding_error:

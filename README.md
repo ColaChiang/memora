@@ -54,6 +54,7 @@ Agentic Memory
 - Day 17：完成 `Memora v0.14`，用 Chroma PersistentClient 建立可跨程式保存的 `LongTermMemoryStore`。
 - Day 18：完成 `Memora v0.15`，在回答前自動檢索、篩選相關記憶，並把它納入 Context Token Budget。
 - Day 19：完成 `Memora v0.16`，用持久化 JSON Profile 區分目前使用者設定與可搜尋的過去記憶。
+- Day 20：完成 `Memora v0.17`，將 Semantic 與 Episodic Memory 類型一路保留到 Chroma Metadata 與 Retrieval Context。
 
 ## 執行方式
 
@@ -67,9 +68,9 @@ export OPENAI_API_KEY="你的 API Key"
 python chatbot.py
 ```
 
-輸入 `history` 可以查看目前的 Conversation History，輸入 `exit` 即可結束程式。API Key 由環境變數讀取，不會寫進原始碼或 Git repository。
+輸入 `history` 可查看目前對話，`memories` 可查看長期記憶，`profile` 可查看目前使用者設定，`exit` 則結束程式。手動記憶格式為 `remember semantic <內容>` 或 `remember episodic <內容>`。API Key 由環境變數讀取，不會寫進原始碼或 Git repository。
 
-目前的 History 只存在記憶體中；結束程式後便會消失。這是 Day 06 刻意保留的限制，後續才會加入 Context Management 與可持久化的長期記憶。
+Conversation History 只存在目前 Process；經過抽取的 Long-term Memory 會保存在 `memora_db/`，User Profile 則保存在 `user_profile.json`。兩者都已排除於 Git，以免誤提交個人資料。
 
 ## 系列文章
 
@@ -92,3 +93,4 @@ python chatbot.py
 - [Day 17｜打造第一個 Long-term Memory Store](https://ithelp.ithome.com.tw/articles/10408001)
 - [Day 18｜讓 AI 找回過去：Memory Retrieval](https://ithelp.ithome.com.tw/articles/10408560)
 - [Day 19｜Memory ≠ User Profile：記住事情和認識一個人的差別](https://ithelp.ithome.com.tw/articles/10409065)
+- [Day 20｜Semantic Memory vs Episodic Memory：AI 到底記得什麼？](https://ithelp.ithome.com.tw/articles/10409278)
