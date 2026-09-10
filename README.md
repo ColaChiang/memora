@@ -53,6 +53,7 @@ Agentic Memory
 - Day 16：完成 `Memora v0.13`，改用 Chroma 儲存 Embedding、Metadata，並以 Cosine Distance 執行搜尋。
 - Day 17：完成 `Memora v0.14`，用 Chroma PersistentClient 建立可跨程式保存的 `LongTermMemoryStore`。
 - Day 18：完成 `Memora v0.15`，在回答前自動檢索、篩選相關記憶，並把它納入 Context Token Budget。
+- Day 19：完成 `Memora v0.16`，用持久化 JSON Profile 區分目前使用者設定與可搜尋的過去記憶。
 
 ## 執行方式
 
@@ -90,3 +91,4 @@ python chatbot.py
 - [Day 16｜Vector Database 到底在做什麼？](https://ithelp.ithome.com.tw/articles/10408000)
 - [Day 17｜打造第一個 Long-term Memory Store](https://ithelp.ithome.com.tw/articles/10408001)
 - [Day 18｜讓 AI 找回過去：Memory Retrieval](https://ithelp.ithome.com.tw/articles/10408560)
+- [Day 19｜Memory ≠ User Profile：記住事情和認識一個人的差別](https://ithelp.ithome.com.tw/articles/10409065)

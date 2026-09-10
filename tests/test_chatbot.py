@@ -5,6 +5,7 @@ from io import StringIO
 import builtins
 import contextlib
 import sys
+import tempfile
 import types
 import unittest
 from unittest.mock import patch
@@ -137,6 +138,11 @@ class ChatbotTest(unittest.TestCase):
                 "create_long_term_memory_store",
                 return_value=chatbot.LongTermMemoryStore("", "", FakeCollection()),
             ),
+            patch.object(
+                chatbot,
+                "create_user_profile_store",
+                return_value=chatbot.UserProfileStore(chatbot.Path("missing-profile.json")),
+            ),
             patch.object(builtins, "input", side_effect=lambda _="": next(inputs)),
             contextlib.redirect_stdout(output),
         ):
@@ -199,6 +205,11 @@ class ChatbotTest(unittest.TestCase):
                 chatbot,
                 "create_long_term_memory_store",
                 return_value=chatbot.LongTermMemoryStore("", "", FakeCollection()),
+            ),
+            patch.object(
+                chatbot,
+                "create_user_profile_store",
+                return_value=chatbot.UserProfileStore(chatbot.Path("missing-profile.json")),
             ),
             patch.object(builtins, "input", side_effect=lambda _="": next(inputs)),
             contextlib.redirect_stdout(output),
@@ -299,7 +310,7 @@ class ChatbotTest(unittest.TestCase):
             store,
             "請安排適合我的課程",
         )
-        messages = chatbot.build_memory_messages(memories)
+        messages = chatbot.build_background_messages(chatbot.UserProfile(), memories)
 
         self.assertEqual(len(memories), 1)
         self.assertEqual(tokens, 3)
@@ -315,6 +326,40 @@ class ChatbotTest(unittest.TestCase):
 
         self.assertEqual(stats["context_messages"][0], background[0])
         self.assertEqual(stats["input_tokens"], 20)
+
+    def test_user_profile_store_persists_and_reloads(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = chatbot.Path(temp_dir) / "user_profile.json"
+            store = chatbot.UserProfileStore(path)
+            store.set_english_level("b1")
+            store.add_learning_goal("旅遊英文")
+            store.add_preference("簡短例句")
+
+            reloaded = chatbot.UserProfileStore(path).get()
+
+        self.assertEqual(reloaded.english_level, "B1")
+        self.assertEqual(reloaded.learning_goals, ["旅遊英文"])
+        self.assertEqual(reloaded.preferences, ["簡短例句"])
+
+    def test_background_combines_profile_and_retrieved_memories(self) -> None:
+        profile = chatbot.UserProfile(
+            english_level="B1",
+            learning_goals=["旅遊英文"],
+        )
+        memory = chatbot.MemorySearchResult(
+            memory_id="memory-1",
+            content="昨天練習過機場報到。",
+            source="automatic",
+            created_at="2026-09-10T00:00:00+00:00",
+            distance=0.1,
+            score=0.9,
+        )
+
+        messages = chatbot.build_background_messages(profile, [memory])
+
+        self.assertIn("<user_profile>", messages[0]["content"])
+        self.assertIn("English level: B1", messages[0]["content"])
+        self.assertIn("<long_term_memories>", messages[0]["content"])
 
 
 if __name__ == "__main__":

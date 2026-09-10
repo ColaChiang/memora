@@ -3,3 +3,4 @@ __pycache__/
 *.py[cod]
 .env
 memora_db/
+user_profile.json
