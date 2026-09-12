@@ -1,6 +1,7 @@
-"""Memora v0.17: distinguish semantic and episodic memories."""
+"""Memora v0.18: apply a policy before writing long-term memories."""
 
 from datetime import datetime, timezone
+import re
 from pathlib import Path
 from typing import Literal
 from uuid import uuid4
@@ -104,8 +105,22 @@ Do not invent information that the user did not state.
 """.strip()
 
 
+SENSITIVE_MEMORY_PATTERNS = (
+    r"\b(?:password|passcode|secret|cvv|api[_ -]?key|access[_ -]?token)\b\s*(?:is|=|:)",
+    r"(?:密碼|驗證碼|信用卡號|安全碼|API\s*金鑰)\s*(?:是|為|=|：|:)",
+    r"\bsk-[A-Za-z0-9_-]{8,}\b",
+    r"\b(?:\d[ -]?){13,19}\b",
+)
+TRANSIENT_MEMORY_PATTERNS = (
+    r"(?:今天|明天|今晚|稍後|等一下|待會).{0,12}(?:提醒|鬧鐘|待辦)",
+    r"(?:提醒|鬧鐘|待辦).{0,12}(?:今天|明天|今晚|稍後|等一下|待會)",
+    r"\b(?:remind|reminder|alarm)\b.{0,32}\b(?:today|tomorrow|tonight|later)\b",
+    r"\b(?:today|tomorrow|tonight|later)\b.{0,32}\b(?:remind|reminder|alarm)\b",
+)
+
 ExtractedMemoryType = Literal["semantic", "episodic"]
 StoredMemoryType = Literal["semantic", "episodic", "unclassified"]
+MemorySource = Literal["automatic", "manual"]
 
 
 class MemoryCandidate(BaseModel):
@@ -128,6 +143,25 @@ class MemoryExtractionResult(BaseModel):
             "should_remember is false."
         )
     )
+
+
+class MemoryPolicyDecision(BaseModel):
+    candidate: MemoryCandidate
+    source: MemorySource
+    should_store: bool
+    reason: str
+
+
+class MemoryPolicyResult(BaseModel):
+    decisions: list[MemoryPolicyDecision]
+
+    @property
+    def approved_memories(self) -> list[MemoryCandidate]:
+        return [
+            decision.candidate
+            for decision in self.decisions
+            if decision.should_store
+        ]
 
 
 class EmbeddedMemoryCandidate(BaseModel):
@@ -211,6 +245,48 @@ def extract_memory_candidates(
     if response.output_parsed is None:
         raise ValueError("Memory Extraction 沒有產生可解析的結果。")
     return response.output_parsed, response.usage.total_tokens
+
+
+def matches_memory_pattern(content: str, patterns: tuple[str, ...]) -> bool:
+    return any(re.search(pattern, content, flags=re.IGNORECASE) for pattern in patterns)
+
+
+def apply_memory_policy(
+    candidates: list[MemoryCandidate],
+    source: MemorySource,
+) -> MemoryPolicyResult:
+    """Choose which candidates may enter long-term memory."""
+    decisions = []
+    for candidate in candidates:
+        content = candidate.content.strip()
+        if not content:
+            should_store = False
+            reason = "拒絕保存空白記憶。"
+        elif matches_memory_pattern(content, SENSITIVE_MEMORY_PATTERNS):
+            should_store = False
+            reason = "拒絕保存可能包含密碼、金鑰或驗證資訊的敏感內容。"
+        elif source == "automatic" and matches_memory_pattern(
+            content,
+            TRANSIENT_MEMORY_PATTERNS,
+        ):
+            should_store = False
+            reason = "自動抽取不保存只在短時間內有效的提醒或待辦。"
+        elif source == "manual":
+            should_store = True
+            reason = "使用者明確要求保存，且內容通過安全檢查。"
+        else:
+            should_store = True
+            reason = "自動抽取的內容通過長期記憶規則。"
+
+        decisions.append(
+            MemoryPolicyDecision(
+                candidate=candidate,
+                source=source,
+                should_store=should_store,
+                reason=reason,
+            )
+        )
+    return MemoryPolicyResult(decisions=decisions)
 
 
 def create_embeddings(
@@ -683,11 +759,12 @@ def main() -> None:
     long_term_memory = create_long_term_memory_store()
     user_profile_store = create_user_profile_store()
     last_extraction_output = ""
+    last_policy_output = ""
 
-    print("Memora v0.17")
+    print("Memora v0.18")
     print(
         "Commands: history, context, summary, status, "
-        "remember <semantic|episodic> <text>, memories, extraction, "
+        "remember <semantic|episodic> <text>, memories, extraction, policy, "
         "search <query>, profile, exit"
     )
 
@@ -701,6 +778,7 @@ def main() -> None:
         embedding_tokens = 0
         embedding_error = ""
         new_embedded_candidates: list[EmbeddedMemoryCandidate] = []
+        policy_decisions: list[MemoryPolicyDecision] = []
         retrieved_memories: list[MemorySearchResult] = []
         retrieval_embedding_tokens = 0
 
@@ -738,6 +816,11 @@ def main() -> None:
             print("\n--- Last Extraction Output ---")
             print(last_extraction_output or "(not run)")
             print("------------------------------")
+            continue
+        if command == "policy":
+            print("\n--- Last Memory Policy Output ---")
+            print(last_policy_output or "(not run)")
+            print("---------------------------------")
             continue
         if command == "search":
             print("Usage: search <query>")
@@ -791,10 +874,16 @@ def main() -> None:
                 memory_type=memory_type,
             )
             last_extraction_output = candidate.model_dump_json(indent=2)
+            policy_result = apply_memory_policy([candidate], source="manual")
+            policy_decisions = policy_result.decisions
+            last_policy_output = policy_result.model_dump_json(indent=2)
+            if not policy_result.approved_memories:
+                print("Memory skipped by policy:", policy_decisions[0].reason)
+                continue
             try:
                 new_embedded_candidates, embedding_tokens = embed_memory_candidates(
                     client,
-                    [candidate],
+                    policy_result.approved_memories,
                 )
                 memory_ids = long_term_memory.add(
                     new_embedded_candidates,
@@ -860,11 +949,18 @@ def main() -> None:
             except Exception as error:
                 last_extraction_output = f"Extraction failed: {error}"
 
-        if extracted_candidates:
+        policy_result = apply_memory_policy(
+            extracted_candidates,
+            source="automatic",
+        )
+        policy_decisions = policy_result.decisions
+        last_policy_output = policy_result.model_dump_json(indent=2)
+
+        if policy_result.approved_memories:
             try:
                 new_embedded_candidates, embedding_tokens = embed_memory_candidates(
                     client,
-                    extracted_candidates,
+                    policy_result.approved_memories,
                 )
                 long_term_memory.add(
                     new_embedded_candidates,
@@ -890,6 +986,15 @@ def main() -> None:
                 print("  Type:", candidate.memory_type)
                 print("  Dimensions:", len(candidate.embedding))
             print("-----------------------------")
+        rejected_decisions = [
+            decision for decision in policy_decisions if not decision.should_store
+        ]
+        if rejected_decisions:
+            print("\n--- Skipped by Memory Policy ---")
+            for decision in rejected_decisions:
+                print("-", decision.candidate.content)
+                print("  Reason:", decision.reason)
+            print("--------------------------------")
         if embedding_error:
             print("\nEmbedding failed:", embedding_error)
         print("\n--- Memory Status ---")

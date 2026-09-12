@@ -386,6 +386,32 @@ class ChatbotTest(unittest.TestCase):
         self.assertIn("<long_term_memories>", messages[0]["content"])
         self.assertIn("[episodic]", messages[0]["content"])
 
+    def test_policy_rejects_sensitive_content_for_every_source(self) -> None:
+        candidate = chatbot.MemoryCandidate(
+            content="The user's API key is sk-example-secret-1234.",
+            memory_type="semantic",
+        )
+
+        automatic = chatbot.apply_memory_policy([candidate], source="automatic")
+        manual = chatbot.apply_memory_policy([candidate], source="manual")
+
+        self.assertFalse(automatic.decisions[0].should_store)
+        self.assertFalse(manual.decisions[0].should_store)
+        self.assertIn("敏感", manual.decisions[0].reason)
+
+    def test_policy_respects_explicit_request_for_transient_memory(self) -> None:
+        candidate = chatbot.MemoryCandidate(
+            content="請明天提醒使用者複習單字。",
+            memory_type="episodic",
+        )
+
+        automatic = chatbot.apply_memory_policy([candidate], source="automatic")
+        manual = chatbot.apply_memory_policy([candidate], source="manual")
+
+        self.assertEqual(automatic.approved_memories, [])
+        self.assertEqual(manual.approved_memories, [candidate])
+        self.assertIn("明確要求", manual.decisions[0].reason)
+
     def test_old_memory_without_type_is_unclassified(self) -> None:
         collection = FakeCollection()
         collection.add(
