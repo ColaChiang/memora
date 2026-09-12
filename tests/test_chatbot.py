@@ -34,6 +34,11 @@ class FakeResponses:
             should_remember=False,
             memories=[],
         )
+        self.update_decision = chatbot.MemoryUpdateDecision(
+            action="add",
+            target_memory_id=None,
+            reason="新增不同的事實。",
+        )
 
     def create(self, **kwargs: object) -> object:
         self.calls.append(deepcopy(kwargs))
@@ -48,8 +53,13 @@ class FakeResponses:
 
     def parse(self, **kwargs: object) -> object:
         self.calls.append(deepcopy(kwargs))
+        parsed_output = (
+            self.update_decision
+            if kwargs.get("text_format") is chatbot.MemoryUpdateDecision
+            else self.extraction_result
+        )
         return types.SimpleNamespace(
-            output_parsed=self.extraction_result,
+            output_parsed=parsed_output,
             usage=types.SimpleNamespace(
                 input_tokens=8,
                 output_tokens=2,
@@ -106,6 +116,15 @@ class FakeCollection:
             "documents": [record["document"] for record in self.records],
             "metadatas": [record["metadata"] for record in self.records],
         }
+
+    def update(self, *, ids, documents, embeddings, metadatas) -> None:
+        for memory_id, document, embedding, metadata in zip(
+            ids, documents, embeddings, metadatas
+        ):
+            record = next(item for item in self.records if item["id"] == memory_id)
+            record["document"] = document
+            record["embedding"] = embedding
+            record["metadata"] = metadata
 
     def query(self, *, query_embeddings, n_results, include) -> dict[str, object]:
         records = self.records[:n_results]
@@ -216,7 +235,7 @@ class ChatbotTest(unittest.TestCase):
         ):
             chatbot.main()
 
-        self.assertIn("New Embedded Memories", output.getvalue())
+        self.assertIn("Memory Write Result", output.getvalue())
         self.assertIn("1. 我的英文程度是 B1。", output.getvalue())
         self.assertIn("Source: manual", output.getvalue())
 
@@ -385,6 +404,102 @@ class ChatbotTest(unittest.TestCase):
         self.assertIn("English level: B1", messages[0]["content"])
         self.assertIn("<long_term_memories>", messages[0]["content"])
         self.assertIn("[episodic]", messages[0]["content"])
+
+    def test_store_updates_memory_in_place(self) -> None:
+        store = chatbot.LongTermMemoryStore("", "", FakeCollection())
+        memory_id = store.add(
+            [
+                chatbot.EmbeddedMemoryCandidate(
+                    content="The user's English level is B1.",
+                    memory_type="semantic",
+                    embedding=[1.0],
+                )
+            ],
+            source="automatic",
+        )[0]
+        created_at = store.list_all()[0].created_at
+
+        store.update(
+            memory_id,
+            chatbot.EmbeddedMemoryCandidate(
+                content="The user's English level is B2.",
+                memory_type="semantic",
+                embedding=[2.0],
+            ),
+            source="automatic",
+        )
+        updated = store.list_all()[0]
+
+        self.assertEqual(store.count(), 1)
+        self.assertEqual(updated.memory_id, memory_id)
+        self.assertEqual(updated.content, "The user's English level is B2.")
+        self.assertEqual(updated.created_at, created_at)
+        self.assertNotEqual(updated.updated_at, "unknown")
+
+    def test_semantic_conflict_can_update_existing_memory(self) -> None:
+        client = FakeClient()
+        store = chatbot.LongTermMemoryStore("", "", FakeCollection())
+        memory_id = store.add(
+            [
+                chatbot.EmbeddedMemoryCandidate(
+                    content="The user's English level is B1.",
+                    memory_type="semantic",
+                    embedding=[1.0, 0.0],
+                )
+            ],
+            source="automatic",
+        )[0]
+        client.responses.update_decision = chatbot.MemoryUpdateDecision(
+            action="update",
+            target_memory_id=memory_id,
+            reason="The user provided a newer English level.",
+        )
+
+        result, tokens = chatbot.write_memory_candidate(
+            client,
+            store,
+            chatbot.EmbeddedMemoryCandidate(
+                content="The user's English level is B2.",
+                memory_type="semantic",
+                embedding=[1.0, 0.0],
+            ),
+            source="automatic",
+        )
+
+        self.assertEqual(result.action, "update")
+        self.assertEqual(result.memory_id, memory_id)
+        self.assertEqual(store.count(), 1)
+        self.assertEqual(store.list_all()[0].content, "The user's English level is B2.")
+        self.assertEqual(tokens, 10)
+
+    def test_exact_semantic_duplicate_is_skipped_without_llm_call(self) -> None:
+        client = FakeClient()
+        store = chatbot.LongTermMemoryStore("", "", FakeCollection())
+        store.add(
+            [
+                chatbot.EmbeddedMemoryCandidate(
+                    content="The user prefers short examples.",
+                    memory_type="semantic",
+                    embedding=[1.0],
+                )
+            ],
+            source="automatic",
+        )
+
+        result, tokens = chatbot.write_memory_candidate(
+            client,
+            store,
+            chatbot.EmbeddedMemoryCandidate(
+                content="  The user prefers short examples!  ",
+                memory_type="semantic",
+                embedding=[1.0],
+            ),
+            source="automatic",
+        )
+
+        self.assertEqual(result.action, "skip")
+        self.assertEqual(store.count(), 1)
+        self.assertEqual(tokens, 0)
 
     def test_policy_rejects_sensitive_content_for_every_source(self) -> None:
         candidate = chatbot.MemoryCandidate(
