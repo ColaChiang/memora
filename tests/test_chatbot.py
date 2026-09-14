@@ -1,6 +1,7 @@
 """Tests for Memora's in-session conversation history."""
 
 from copy import deepcopy
+from datetime import datetime, timedelta, timezone
 from io import StringIO
 import builtins
 import contextlib
@@ -34,10 +35,13 @@ class FakeResponses:
             should_remember=False,
             memories=[],
         )
-        self.update_decision = chatbot.MemoryUpdateDecision(
-            action="add",
-            target_memory_id=None,
-            reason="新增不同的事實。",
+        self.importance_result = chatbot.ImportanceAssessmentResult(
+            assessments=[
+                chatbot.ImportanceAssessment(
+                    candidate_index=0,
+                    importance_score=3,
+                )
+            ]
         )
 
     def create(self, **kwargs: object) -> object:
@@ -53,11 +57,10 @@ class FakeResponses:
 
     def parse(self, **kwargs: object) -> object:
         self.calls.append(deepcopy(kwargs))
-        parsed_output = (
-            self.update_decision
-            if kwargs.get("text_format") is chatbot.MemoryUpdateDecision
-            else self.extraction_result
-        )
+        if kwargs.get("text_format") is chatbot.ImportanceAssessmentResult:
+            parsed_output = self.importance_result
+        else:
+            parsed_output = self.extraction_result
         return types.SimpleNamespace(
             output_parsed=parsed_output,
             usage=types.SimpleNamespace(
@@ -110,21 +113,31 @@ class FakeCollection:
     def count(self) -> int:
         return len(self.records)
 
-    def get(self, *, include) -> dict[str, object]:
+    def get(self, *, include, ids=None) -> dict[str, object]:
+        records = self.records
+        if ids is not None:
+            records_by_id = {record["id"]: record for record in self.records}
+            records = [records_by_id[memory_id] for memory_id in ids if memory_id in records_by_id]
         return {
-            "ids": [record["id"] for record in self.records],
-            "documents": [record["document"] for record in self.records],
-            "metadatas": [record["metadata"] for record in self.records],
+            "ids": [record["id"] for record in records],
+            "documents": [record["document"] for record in records],
+            "metadatas": [record["metadata"] for record in records],
         }
 
-    def update(self, *, ids, documents, embeddings, metadatas) -> None:
-        for memory_id, document, embedding, metadata in zip(
-            ids, documents, embeddings, metadatas
-        ):
+    def update(self, *, ids, metadatas, documents=None, embeddings=None) -> None:
+        for index, (memory_id, metadata) in enumerate(zip(ids, metadatas)):
             record = next(item for item in self.records if item["id"] == memory_id)
-            record["document"] = document
-            record["embedding"] = embedding
+            if documents is not None:
+                record["document"] = documents[index]
+            if embeddings is not None:
+                record["embedding"] = embeddings[index]
             record["metadata"] = metadata
+
+    def delete(self, *, ids) -> None:
+        ids_to_delete = set(ids)
+        self.records = [
+            record for record in self.records if record["id"] not in ids_to_delete
+        ]
 
     def query(self, *, query_embeddings, n_results, include) -> dict[str, object]:
         records = self.records[:n_results]
@@ -235,7 +248,7 @@ class ChatbotTest(unittest.TestCase):
         ):
             chatbot.main()
 
-        self.assertIn("Memory Write Result", output.getvalue())
+        self.assertIn("Stored Memories", output.getvalue())
         self.assertIn("1. 我的英文程度是 B1。", output.getvalue())
         self.assertIn("Source: manual", output.getvalue())
 
@@ -268,13 +281,18 @@ class ChatbotTest(unittest.TestCase):
         embedded, tokens = chatbot.embed_memory_candidates(
             client,
             [
-                chatbot.MemoryCandidate(content="first", memory_type="semantic"),
-                chatbot.MemoryCandidate(content="second", memory_type="episodic"),
+                chatbot.ScoredMemoryCandidate(
+                    content="first", memory_type="semantic", importance_score=5
+                ),
+                chatbot.ScoredMemoryCandidate(
+                    content="second", memory_type="episodic", importance_score=2
+                ),
             ],
         )
 
         self.assertEqual([item.content for item in embedded], ["first", "second"])
         self.assertEqual(embedded[1].memory_type, "episodic")
+        self.assertEqual(embedded[1].importance_score, 2)
         self.assertEqual(embedded[1].embedding, [1.0, 1.0])
         self.assertEqual(tokens, 6)
 
@@ -284,11 +302,13 @@ class ChatbotTest(unittest.TestCase):
             chatbot.EmbeddedMemoryCandidate(
                 content="travel English",
                 memory_type="semantic",
+                importance_score=5,
                 embedding=[1.0, 0.0],
             ),
             chatbot.EmbeddedMemoryCandidate(
                 content="grammar book",
                 memory_type="episodic",
+                importance_score=2,
                 embedding=[0.0, 1.0],
             ),
         ]
@@ -315,6 +335,7 @@ class ChatbotTest(unittest.TestCase):
                 chatbot.EmbeddedMemoryCandidate(
                     content="使用者程度是 B1。",
                     memory_type="semantic",
+                    importance_score=4,
                     embedding=[1.0],
                 )
             ],
@@ -336,11 +357,13 @@ class ChatbotTest(unittest.TestCase):
                 chatbot.EmbeddedMemoryCandidate(
                     content="使用者程度是 B1。",
                     memory_type="semantic",
+                    importance_score=4,
                     embedding=[1.0],
                 ),
                 chatbot.EmbeddedMemoryCandidate(
                     content="曾問過現在完成式。",
                     memory_type="episodic",
+                    importance_score=2,
                     embedding=[0.0],
                 ),
             ],
@@ -405,101 +428,185 @@ class ChatbotTest(unittest.TestCase):
         self.assertIn("<long_term_memories>", messages[0]["content"])
         self.assertIn("[episodic]", messages[0]["content"])
 
-    def test_store_updates_memory_in_place(self) -> None:
+    def test_importance_scoring_preserves_candidate_order(self) -> None:
+        client = FakeClient()
+        client.responses.importance_result = chatbot.ImportanceAssessmentResult(
+            assessments=[
+                chatbot.ImportanceAssessment(candidate_index=1, importance_score=2),
+                chatbot.ImportanceAssessment(candidate_index=0, importance_score=5),
+            ]
+        )
+
+        scored, tokens = chatbot.score_memory_importance(
+            client,
+            [
+                chatbot.MemoryCandidate(content="B2 exam", memory_type="semantic"),
+                chatbot.MemoryCandidate(content="five words", memory_type="episodic"),
+            ],
+        )
+
+        self.assertEqual([item.content for item in scored], ["B2 exam", "five words"])
+        self.assertEqual([item.importance_score for item in scored], [5, 2])
+        self.assertEqual(tokens, 10)
+
+    def test_importance_scoring_rejects_missing_candidate(self) -> None:
+        client = FakeClient()
+        with self.assertRaises(ValueError):
+            chatbot.score_memory_importance(
+                client,
+                [
+                    chatbot.MemoryCandidate(content="first", memory_type="semantic"),
+                    chatbot.MemoryCandidate(content="second", memory_type="semantic"),
+                ],
+            )
+
+    def test_shared_storage_scores_embeds_and_persists_importance(self) -> None:
+        client = FakeClient()
+        client.responses.importance_result = chatbot.ImportanceAssessmentResult(
+            assessments=[
+                chatbot.ImportanceAssessment(candidate_index=0, importance_score=4)
+            ]
+        )
+        store = chatbot.LongTermMemoryStore("", "", FakeCollection())
+
+        scored, memory_ids, importance_tokens, embedding_tokens = (
+            chatbot.store_accepted_memories(
+                client,
+                store,
+                [
+                    chatbot.MemoryCandidate(
+                        content="The user studies business English.",
+                        memory_type="semantic",
+                    )
+                ],
+                source="manual",
+            )
+        )
+
+        stored = store.list_all()[0]
+        self.assertEqual(scored[0].importance_score, 4)
+        self.assertEqual(stored.memory_id, memory_ids[0])
+        self.assertEqual(stored.importance_score, 4)
+        self.assertEqual(importance_tokens, 10)
+        self.assertEqual(embedding_tokens, 3)
+
+    def test_recency_score_uses_seven_day_half_life(self) -> None:
+        now = datetime(2026, 9, 14, tzinfo=timezone.utc)
+
+        self.assertAlmostEqual(chatbot.calculate_recency_score(now.isoformat(), now), 1)
+        self.assertAlmostEqual(
+            chatbot.calculate_recency_score((now - timedelta(days=7)).isoformat(), now),
+            0.5,
+        )
+        self.assertAlmostEqual(
+            chatbot.calculate_recency_score((now - timedelta(days=14)).isoformat(), now),
+            0.25,
+        )
+        self.assertEqual(chatbot.calculate_recency_score("unknown", now), 0.5)
+
+    def test_retrieval_score_combines_relevance_importance_and_recency(self) -> None:
+        now = datetime(2026, 9, 14, tzinfo=timezone.utc)
+        result = chatbot.MemorySearchResult(
+            memory_id="memory-1",
+            content="B2 exam",
+            memory_type="semantic",
+            source="automatic",
+            created_at=now.isoformat(),
+            last_accessed_at=(now - timedelta(days=7)).isoformat(),
+            importance_score=5,
+            distance=0.2,
+            score=0.8,
+        )
+
+        self.assertAlmostEqual(chatbot.calculate_retrieval_score(result, now), 0.81)
+
+    def test_touch_updates_only_selected_memory_and_preserves_metadata(self) -> None:
+        collection = FakeCollection()
+        store = chatbot.LongTermMemoryStore("", "", collection)
+        memory_ids = store.add(
+            [
+                chatbot.EmbeddedMemoryCandidate(
+                    content="first",
+                    memory_type="semantic",
+                    importance_score=5,
+                    embedding=[1.0],
+                ),
+                chatbot.EmbeddedMemoryCandidate(
+                    content="second",
+                    memory_type="episodic",
+                    importance_score=2,
+                    embedding=[0.0],
+                ),
+            ],
+            source="automatic",
+        )
+        before = deepcopy(collection.records)
+
+        store.touch([memory_ids[0], memory_ids[0]])
+
+        self.assertEqual(collection.records[1], before[1])
+        self.assertEqual(collection.records[0]["metadata"]["source"], "automatic")
+        self.assertEqual(collection.records[0]["metadata"]["importance_score"], 5)
+        self.assertIn("last_accessed_at", collection.records[0]["metadata"])
+
+    def test_delete_forgets_only_existing_memory_id(self) -> None:
         store = chatbot.LongTermMemoryStore("", "", FakeCollection())
         memory_id = store.add(
             [
                 chatbot.EmbeddedMemoryCandidate(
-                    content="The user's English level is B1.",
-                    memory_type="semantic",
+                    content="forget me",
+                    memory_type="episodic",
+                    importance_score=1,
                     embedding=[1.0],
                 )
             ],
-            source="automatic",
+            source="manual",
         )[0]
-        created_at = store.list_all()[0].created_at
 
-        store.update(
-            memory_id,
-            chatbot.EmbeddedMemoryCandidate(
-                content="The user's English level is B2.",
-                memory_type="semantic",
-                embedding=[2.0],
-            ),
-            source="automatic",
-        )
-        updated = store.list_all()[0]
+        self.assertTrue(store.delete(memory_id))
+        self.assertFalse(store.delete(memory_id))
+        self.assertEqual(store.count(), 0)
 
-        self.assertEqual(store.count(), 1)
-        self.assertEqual(updated.memory_id, memory_id)
-        self.assertEqual(updated.content, "The user's English level is B2.")
-        self.assertEqual(updated.created_at, created_at)
-        self.assertNotEqual(updated.updated_at, "unknown")
-
-    def test_semantic_conflict_can_update_existing_memory(self) -> None:
-        client = FakeClient()
-        store = chatbot.LongTermMemoryStore("", "", FakeCollection())
-        memory_id = store.add(
-            [
-                chatbot.EmbeddedMemoryCandidate(
-                    content="The user's English level is B1.",
-                    memory_type="semantic",
-                    embedding=[1.0, 0.0],
-                )
+    def test_legacy_metadata_uses_compatible_defaults(self) -> None:
+        collection = FakeCollection()
+        collection.add(
+            ids=["legacy"],
+            documents=["old memory"],
+            embeddings=[[1.0]],
+            metadatas=[
+                {"source": "automatic", "created_at": "2026-09-01T00:00:00+00:00"}
             ],
-            source="automatic",
-        )[0]
-        client.responses.update_decision = chatbot.MemoryUpdateDecision(
-            action="update",
-            target_memory_id=memory_id,
-            reason="The user provided a newer English level.",
         )
+        stored = chatbot.LongTermMemoryStore("", "", collection).list_all()[0]
 
-        result, tokens = chatbot.write_memory_candidate(
-            client,
-            store,
-            chatbot.EmbeddedMemoryCandidate(
-                content="The user's English level is B2.",
-                memory_type="semantic",
-                embedding=[1.0, 0.0],
-            ),
-            source="automatic",
-        )
+        self.assertEqual(stored.importance_score, 3)
+        self.assertEqual(stored.last_accessed_at, stored.created_at)
+        self.assertEqual(chatbot.read_importance_score({"importance_score": True}), 3)
 
-        self.assertEqual(result.action, "update")
-        self.assertEqual(result.memory_id, memory_id)
-        self.assertEqual(store.count(), 1)
-        self.assertEqual(store.list_all()[0].content, "The user's English level is B2.")
-        self.assertEqual(tokens, 10)
-
-    def test_exact_semantic_duplicate_is_skipped_without_llm_call(self) -> None:
+    def test_search_does_not_touch_memory(self) -> None:
         client = FakeClient()
-        store = chatbot.LongTermMemoryStore("", "", FakeCollection())
+        collection = FakeCollection()
+        store = chatbot.LongTermMemoryStore("", "", collection)
         store.add(
             [
                 chatbot.EmbeddedMemoryCandidate(
-                    content="The user prefers short examples.",
+                    content="airport English",
                     memory_type="semantic",
+                    importance_score=3,
                     embedding=[1.0],
                 )
             ],
             source="automatic",
         )
+        before = deepcopy(collection.records)
 
-        result, tokens = chatbot.write_memory_candidate(
+        chatbot.semantic_search(
             client,
+            "airport",
             store,
-            chatbot.EmbeddedMemoryCandidate(
-                content="  The user prefers short examples!  ",
-                memory_type="semantic",
-                embedding=[1.0],
-            ),
-            source="automatic",
         )
 
-        self.assertEqual(result.action, "skip")
-        self.assertEqual(store.count(), 1)
-        self.assertEqual(tokens, 0)
+        self.assertEqual(collection.records, before)
 
     def test_policy_rejects_sensitive_content_for_every_source(self) -> None:
         candidate = chatbot.MemoryCandidate(

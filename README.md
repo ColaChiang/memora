@@ -56,7 +56,8 @@ Agentic Memory
 - Day 19：完成 `Memora v0.16`，用持久化 JSON Profile 區分目前使用者設定與可搜尋的過去記憶。
 - Day 20：完成 `Memora v0.17`，將 Semantic 與 Episodic Memory 類型一路保留到 Chroma Metadata 與 Retrieval Context。
 - Day 21：完成 `Memora v0.18`，在寫入前套用 Memory Policy，分流自動抽取與明確記憶要求，並阻擋敏感或短暫內容。
-- Day 22：完成 `Memora v0.19`，針對新舊 Semantic Memory 決定 add、update 或 skip，避免重複與過時事實持續累積。
+- Day 22：完成 `Memora v0.19`，替通過 Policy 的記憶加入 1～5 分 Importance Score，並以 Relevance + Importance 重新排序。
+- Day 23：完成 `Memora v0.20`，以 `last_accessed_at` 與七天 Half-life 將 Recency 納入 Retrieval，並加入可控的 `forget` 指令。
 
 ## 執行方式
 
@@ -70,7 +71,7 @@ export OPENAI_API_KEY="你的 API Key"
 python chatbot.py
 ```
 
-輸入 `history` 可查看目前對話，`memories` 可查看長期記憶，`policy` 可查看最近一次寫入判斷，`updates` 可查看最近一次更新決策，`profile` 可查看目前使用者設定，`exit` 則結束程式。手動記憶格式為 `remember semantic <內容>` 或 `remember episodic <內容>`。API Key 由環境變數讀取，不會寫進原始碼或 Git repository。
+輸入 `history` 可查看目前對話，`memories` 可查看長期記憶及 Importance／Recency，`policy` 可查看最近一次寫入判斷，`search <query>` 可測試語意搜尋，`forget <memory_id>` 可依完整 ID 刪除指定的長期記憶，`profile` 可查看目前使用者設定，`exit` 則結束程式。手動記憶格式為 `remember semantic <內容>` 或 `remember episodic <內容>`。API Key 由環境變數讀取，不會寫進原始碼或 Git repository。
 
 Conversation History 只存在目前 Process；經過抽取的 Long-term Memory 會保存在 `memora_db/`，User Profile 則保存在 `user_profile.json`。兩者都已排除於 Git，以免誤提交個人資料。
 
@@ -97,4 +98,5 @@ Conversation History 只存在目前 Process；經過抽取的 Long-term Memory 
 - [Day 19｜Memory ≠ User Profile：記住事情和認識一個人的差別](https://ithelp.ithome.com.tw/articles/10409065)
 - [Day 20｜Semantic Memory vs Episodic Memory：AI 到底記得什麼？](https://ithelp.ithome.com.tw/articles/10409278)
 - [Day 21｜AI 應該什麼都記住嗎？Memory Policy](https://ithelp.ithome.com.tw/articles/10409577)
-- [Day 22｜Memory Update](https://ithelp.ithome.com.tw/articles/10409812)
+- [Day 22｜Importance Score：哪些記憶比較重要？](https://ithelp.ithome.com.tw/articles/10409812)
+- [Day 23｜AI 也需要遺忘：Memory Decay、Recency 與 Forgetting](https://ithelp.ithome.com.tw/articles/10410230)
