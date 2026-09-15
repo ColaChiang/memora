@@ -1,4 +1,4 @@
-"""Memora v0.20: rank memories by relevance, importance, and recency."""
+"""Memora v0.21: reconcile incoming memories before writing them."""
 
 from datetime import datetime, timezone
 import json
@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 
 MODEL = "gpt-5-mini"
 EMBEDDING_MODEL = "text-embedding-3-small"
+RECONCILIATION_MODEL = "gpt-5.6"
 SEARCH_TOP_K = 3
 RETRIEVAL_CANDIDATE_K = 8
 RETRIEVAL_LIMIT = 3
@@ -27,6 +28,8 @@ DEFAULT_RECENCY_SCORE = 0.5
 RELEVANCE_WEIGHT = 0.7
 IMPORTANCE_WEIGHT = 0.2
 RECENCY_WEIGHT = 0.1
+RECONCILIATION_TOP_K = 3
+RECONCILIATION_MIN_SCORE = 0.78
 MAX_INPUT_TOKENS = 1000
 MAX_RECENT_TURNS = 3
 BASE_DIR = Path(__file__).resolve().parent
@@ -130,6 +133,33 @@ assessment for every candidate_index and never invent an index.
 """.strip()
 
 
+MEMORY_RECONCILIATION_PROMPT = """
+You maintain long-term memory for an English learning assistant.
+Compare one incoming memory with the existing candidate memories.
+
+Choose exactly one action:
+- create: The incoming memory is unrelated to the candidates and should become a
+  new record.
+- skip: An existing candidate already expresses the same fact or event.
+- update: The incoming memory clearly replaces the same mutable current state in
+  one existing semantic memory.
+- keep_both: The memories are related, but both can remain true, especially
+  distinct episodic events or facts about different times.
+- review: There is a possible contradiction, but there is not enough evidence for
+  a safe update.
+
+Rules:
+- Similar wording alone does not mean duplicate.
+- Do not overwrite one event with another event.
+- Use update only when the incoming memory is a clear correction or newer current
+  state.
+- For skip, update, or review, return the exact target_memory_id from the candidates.
+- For create or keep_both, target_memory_id must be null.
+- Do not invent facts.
+- Keep reason to one short sentence.
+""".strip()
+
+
 SENSITIVE_MEMORY_PATTERNS = (
     r"\b(?:password|passcode|secret|cvv|api[_ -]?key|access[_ -]?token)\b\s*(?:is|=|:)",
     r"(?:密碼|驗證碼|信用卡號|安全碼|API\s*金鑰)\s*(?:是|為|=|：|:)",
@@ -146,6 +176,7 @@ TRANSIENT_MEMORY_PATTERNS = (
 ExtractedMemoryType = Literal["semantic", "episodic"]
 StoredMemoryType = Literal["semantic", "episodic", "unclassified"]
 MemorySource = Literal["automatic", "manual"]
+MemoryWriteAction = Literal["create", "skip", "update", "keep_both", "review"]
 
 
 class MemoryCandidate(BaseModel):
@@ -204,6 +235,12 @@ class ImportanceAssessmentResult(BaseModel):
     assessments: list[ImportanceAssessment]
 
 
+class MemoryReconciliationDecision(BaseModel):
+    action: MemoryWriteAction
+    target_memory_id: str | None = None
+    reason: str = Field(min_length=1, max_length=200)
+
+
 class EmbeddedMemoryCandidate(BaseModel):
     content: str
     memory_type: ExtractedMemoryType
@@ -217,6 +254,7 @@ class MemorySearchResult(BaseModel):
     memory_type: StoredMemoryType
     source: str
     created_at: str
+    updated_at: str = "unknown"
     distance: float
     score: float
     importance_score: int = Field(DEFAULT_IMPORTANCE_SCORE, ge=1, le=5)
@@ -229,6 +267,7 @@ class StoredMemory(BaseModel):
     memory_type: StoredMemoryType
     source: str
     created_at: str
+    updated_at: str = "unknown"
     importance_score: int = Field(DEFAULT_IMPORTANCE_SCORE, ge=1, le=5)
     last_accessed_at: str = "unknown"
 
@@ -403,6 +442,8 @@ def embed_memory_candidates(
         client,
         [candidate.content for candidate in candidates],
     )
+    if len(vectors) != len(candidates):
+        raise RuntimeError("Embedding count does not match the number of memories.")
     embedded = [
         EmbeddedMemoryCandidate(
             content=candidate.content,
@@ -455,6 +496,7 @@ class LongTermMemoryStore:
                 {
                     "source": source,
                     "created_at": created_at,
+                    "updated_at": created_at,
                     "last_accessed_at": created_at,
                     "memory_type": memory.memory_type,
                     "importance_score": memory.importance_score,
@@ -463,6 +505,38 @@ class LongTermMemoryStore:
             ],
         )
         return memory_ids
+
+    def update(
+        self,
+        memory_id: str,
+        memory: EmbeddedMemoryCandidate,
+        source: str,
+    ) -> bool:
+        records = self.collection.get(ids=[memory_id], include=["metadatas"])
+        record_ids = records.get("ids", [])
+        if not record_ids:
+            return False
+
+        record_metadatas = records.get("metadatas") or [{}]
+        metadata = dict(record_metadatas[0] or {})
+        updated_at = datetime.now(timezone.utc).isoformat()
+        metadata.setdefault("created_at", updated_at)
+        metadata.setdefault("last_accessed_at", metadata["created_at"])
+        metadata.update(
+            {
+                "source": source,
+                "updated_at": updated_at,
+                "memory_type": memory.memory_type,
+                "importance_score": memory.importance_score,
+            }
+        )
+        self.collection.update(
+            ids=[memory_id],
+            documents=[memory.content],
+            embeddings=[memory.embedding],
+            metadatas=[metadata],
+        )
+        return True
 
     def touch(self, memory_ids: list[str]) -> None:
         unique_ids = list(dict.fromkeys(memory_ids))
@@ -509,7 +583,8 @@ class LongTermMemoryStore:
                     content=document,
                     memory_type=read_memory_type(metadata),
                     source=metadata.get("source", "unknown"),
-                    created_at=metadata.get("created_at", "unknown"),
+                    created_at=read_created_at(metadata),
+                    updated_at=read_updated_at(metadata),
                     importance_score=read_importance_score(metadata),
                     last_accessed_at=read_last_accessed_at(metadata),
                 )
@@ -547,7 +622,8 @@ class LongTermMemoryStore:
                     content=document,
                     memory_type=read_memory_type(metadata),
                     source=metadata.get("source", "unknown"),
-                    created_at=metadata.get("created_at", "unknown"),
+                    created_at=read_created_at(metadata),
+                    updated_at=read_updated_at(metadata),
                     distance=float(distance),
                     score=1 - float(distance),
                     importance_score=read_importance_score(metadata),
@@ -589,6 +665,20 @@ def parse_utc_timestamp(value: str) -> datetime | None:
     return timestamp.astimezone(timezone.utc)
 
 
+def read_created_at(metadata: dict[str, object]) -> str:
+    created_at = metadata.get("created_at")
+    if isinstance(created_at, str) and parse_utc_timestamp(created_at) is not None:
+        return created_at
+    return "unknown"
+
+
+def read_updated_at(metadata: dict[str, object]) -> str:
+    updated_at = metadata.get("updated_at")
+    if isinstance(updated_at, str) and parse_utc_timestamp(updated_at) is not None:
+        return updated_at
+    return read_created_at(metadata)
+
+
 def read_last_accessed_at(metadata: dict[str, object]) -> str:
     last_accessed_at = metadata.get("last_accessed_at")
     if isinstance(last_accessed_at, str) and parse_utc_timestamp(last_accessed_at):
@@ -616,6 +706,24 @@ def calculate_recency_score(
     return 0.5 ** (age_days / RECENCY_HALF_LIFE_DAYS)
 
 
+def calculate_memory_recency_score(
+    last_accessed_at: str,
+    updated_at: str,
+    now: datetime | None = None,
+) -> float:
+    timestamps = [
+        parse_utc_timestamp(last_accessed_at),
+        parse_utc_timestamp(updated_at),
+    ]
+    valid_timestamps = [
+        timestamp for timestamp in timestamps if timestamp is not None
+    ]
+    if not valid_timestamps:
+        return DEFAULT_RECENCY_SCORE
+    latest_activity_at = max(valid_timestamps)
+    return calculate_recency_score(latest_activity_at.isoformat(), now=now)
+
+
 def normalize_importance(score: int) -> float:
     return (score - 1) / 4
 
@@ -626,7 +734,11 @@ def calculate_retrieval_score(
 ) -> float:
     relevance = min(1.0, max(0.0, result.score))
     importance = normalize_importance(result.importance_score)
-    recency = calculate_recency_score(result.last_accessed_at, now=now)
+    recency = calculate_memory_recency_score(
+        last_accessed_at=result.last_accessed_at,
+        updated_at=result.updated_at,
+        now=now,
+    )
     return (
         RELEVANCE_WEIGHT * relevance
         + IMPORTANCE_WEIGHT * importance
@@ -688,19 +800,149 @@ def retrieve_relevant_memories(
     return ranked_memories[:RETRIEVAL_LIMIT], embedding_tokens
 
 
+def find_reconciliation_candidates(
+    long_term_memory: LongTermMemoryStore,
+    incoming: EmbeddedMemoryCandidate,
+) -> list[MemorySearchResult]:
+    candidates = long_term_memory.search(
+        query_embedding=incoming.embedding,
+        top_k=RECONCILIATION_TOP_K,
+    )
+    return [
+        candidate
+        for candidate in candidates
+        if candidate.score >= RECONCILIATION_MIN_SCORE
+    ]
+
+
+def normalize_memory_text(content: str) -> str:
+    return " ".join(content.casefold().split())
+
+
+def find_exact_duplicate(
+    incoming: EmbeddedMemoryCandidate,
+    candidates: list[MemorySearchResult],
+) -> MemorySearchResult | None:
+    incoming_text = normalize_memory_text(incoming.content)
+    for candidate in candidates:
+        if normalize_memory_text(candidate.content) == incoming_text:
+            return candidate
+    return None
+
+
+def decide_memory_reconciliation(
+    client: OpenAI,
+    incoming: EmbeddedMemoryCandidate,
+    candidates: list[MemorySearchResult],
+) -> tuple[MemoryReconciliationDecision, int]:
+    payload = {
+        "incoming_memory": {
+            "content": incoming.content,
+            "memory_type": incoming.memory_type,
+            "importance_score": incoming.importance_score,
+        },
+        "existing_candidates": [
+            {
+                "memory_id": item.memory_id,
+                "content": item.content,
+                "memory_type": item.memory_type,
+                "importance_score": item.importance_score,
+                "created_at": item.created_at,
+                "updated_at": item.updated_at,
+                "similarity_score": item.score,
+            }
+            for item in candidates
+        ],
+    }
+    response = client.responses.parse(
+        model=RECONCILIATION_MODEL,
+        instructions=MEMORY_RECONCILIATION_PROMPT,
+        input=json.dumps(payload, ensure_ascii=False),
+        text_format=MemoryReconciliationDecision,
+    )
+    decision = response.output_parsed
+    if decision is None:
+        raise ValueError("Memory Reconciliation 沒有產生可解析的結果。")
+
+    candidate_ids = {item.memory_id for item in candidates}
+    if decision.action in {"skip", "update", "review"}:
+        if decision.target_memory_id not in candidate_ids:
+            raise ValueError("Invalid reconciliation target.")
+    elif decision.target_memory_id is not None:
+        raise ValueError("This action must not have a target.")
+    return decision, response.usage.total_tokens
+
+
+def reconcile_and_store_memory(
+    client: OpenAI,
+    long_term_memory: LongTermMemoryStore,
+    incoming: EmbeddedMemoryCandidate,
+    source: MemorySource,
+) -> tuple[list[str], int]:
+    candidates = find_reconciliation_candidates(long_term_memory, incoming)
+    exact_duplicate = find_exact_duplicate(incoming, candidates)
+    if exact_duplicate is not None:
+        print("Memory reconciliation: skip (exact duplicate)")
+        return [], 0
+    if not candidates:
+        return long_term_memory.add([incoming], source=source), 0
+
+    decision, reconciliation_tokens = decide_memory_reconciliation(
+        client,
+        incoming,
+        candidates,
+    )
+    print("Memory reconciliation:", decision.action, "-", decision.reason)
+    if decision.action in {"create", "keep_both"}:
+        return (
+            long_term_memory.add([incoming], source=source),
+            reconciliation_tokens,
+        )
+    if decision.action == "skip":
+        return [], reconciliation_tokens
+    if decision.action == "review":
+        print("Memory was not changed. Manual review is required.")
+        return [], reconciliation_tokens
+
+    target_memory_id = decision.target_memory_id
+    if target_memory_id is None:
+        raise ValueError("Update action requires a target.")
+    updated = long_term_memory.update(
+        memory_id=target_memory_id,
+        memory=incoming,
+        source=source,
+    )
+    if not updated:
+        raise ValueError("Reconciliation target no longer exists.")
+    return [target_memory_id], reconciliation_tokens
+
+
 def store_accepted_memories(
     client: OpenAI,
     long_term_memory: LongTermMemoryStore,
     candidates: list[MemoryCandidate],
     source: MemorySource,
-) -> tuple[list[ScoredMemoryCandidate], list[str], int, int]:
+) -> tuple[list[str], int]:
     scored_memories, importance_tokens = score_memory_importance(client, candidates)
+    if not scored_memories:
+        return [], importance_tokens
     embedded_memories, embedding_tokens = embed_memory_candidates(
         client,
         scored_memories,
     )
-    memory_ids = long_term_memory.add(embedded_memories, source=source)
-    return scored_memories, memory_ids, importance_tokens, embedding_tokens
+    affected_memory_ids = []
+    reconciliation_tokens = 0
+    for embedded_memory in embedded_memories:
+        memory_ids, decision_tokens = reconcile_and_store_memory(
+            client,
+            long_term_memory,
+            embedded_memory,
+            source,
+        )
+        affected_memory_ids.extend(memory_ids)
+        reconciliation_tokens += decision_tokens
+    total_tokens = importance_tokens + embedding_tokens + reconciliation_tokens
+    return affected_memory_ids, total_tokens
 
 
 def build_profile_context(profile: UserProfile) -> str:
@@ -978,7 +1220,7 @@ def main() -> None:
     last_extraction_output = ""
     last_policy_output = ""
 
-    print("Memora v0.20")
+    print("Memora v0.21")
     print(
         "Commands: history, context, summary, status, "
         "remember <semantic|episodic> <text>, memories, extraction, policy, "
@@ -992,11 +1234,9 @@ def main() -> None:
         command = user_input.lower()
         should_auto_extract = True
         extraction_tokens = 0
-        importance_tokens = 0
-        embedding_tokens = 0
-        embedding_error = ""
+        memory_storage_tokens = 0
+        memory_storage_error = ""
         policy_decisions: list[MemoryPolicyDecision] = []
-        scored_memories: list[ScoredMemoryCandidate] = []
         stored_memory_ids: list[str] = []
         retrieved_memories: list[MemorySearchResult] = []
         retrieval_embedding_tokens = 0
@@ -1024,17 +1264,19 @@ def main() -> None:
                 print("(no memories)")
             else:
                 for index, stored_memory in enumerate(stored_memories, start=1):
+                    recency_score = calculate_memory_recency_score(
+                        stored_memory.last_accessed_at,
+                        stored_memory.updated_at,
+                    )
                     print(f"{index}. {stored_memory.content}")
                     print(f"   ID: {stored_memory.memory_id}")
                     print(f"   Type: {stored_memory.memory_type}")
                     print(f"   Importance: {stored_memory.importance_score}/5")
                     print(f"   Source: {stored_memory.source}")
                     print(f"   Created at: {stored_memory.created_at}")
+                    print(f"   Updated at: {stored_memory.updated_at}")
                     print(f"   Last accessed: {stored_memory.last_accessed_at}")
-                    print(
-                        "   Recency: "
-                        f"{calculate_recency_score(stored_memory.last_accessed_at):.3f}"
-                    )
+                    print(f"   Recency: {recency_score:.3f}")
             print("-------------------------")
             continue
         if command == "extraction":
@@ -1119,29 +1361,18 @@ def main() -> None:
                 print("Memory skipped by policy:", policy_decisions[0].reason)
                 continue
             try:
-                (
-                    scored_memories,
-                    stored_memory_ids,
-                    importance_tokens,
-                    embedding_tokens,
-                ) = store_accepted_memories(
+                stored_memory_ids, memory_storage_tokens = store_accepted_memories(
                     client,
                     long_term_memory,
                     policy_result.approved_memories,
                     source="manual",
                 )
-                memory.add_token_usage(importance_tokens + embedding_tokens)
+                memory.add_token_usage(memory_storage_tokens)
             except Exception as error:
-                embedding_error = str(error)
-                print("Memory storage failed:", embedding_error)
+                memory_storage_error = str(error)
+                print("Memory storage failed:", memory_storage_error)
                 continue
-            print("\n--- Stored Memories ---")
-            for scored_memory, memory_id in zip(scored_memories, stored_memory_ids):
-                print("-", scored_memory.content)
-                print("  Type:", scored_memory.memory_type)
-                print("  Importance:", f"{scored_memory.importance_score}/5")
-                print("  ID:", memory_id)
-            print("-----------------------")
+            print(f"Stored {len(stored_memory_ids)} memory.")
             continue
 
         memory.add_user_message(user_input)
@@ -1207,20 +1438,15 @@ def main() -> None:
 
         if policy_result.approved_memories:
             try:
-                (
-                    scored_memories,
-                    stored_memory_ids,
-                    importance_tokens,
-                    embedding_tokens,
-                ) = store_accepted_memories(
+                stored_memory_ids, memory_storage_tokens = store_accepted_memories(
                     client,
                     long_term_memory,
                     policy_result.approved_memories,
                     source="automatic",
                 )
-                memory.add_token_usage(importance_tokens + embedding_tokens)
+                memory.add_token_usage(memory_storage_tokens)
             except Exception as error:
-                embedding_error = str(error)
+                memory_storage_error = str(error)
 
         print("Memora:", assistant_reply)
         print("\n--- Retrieved Memories ---")
@@ -1228,23 +1454,19 @@ def main() -> None:
             print("(no relevant memories)")
         else:
             for rank, result in enumerate(retrieved_memories, start=1):
-                print(f"{rank}. [{calculate_retrieval_score(result):.4f}] {result.content}")
+                retrieval_score = calculate_retrieval_score(result)
+                recency_score = calculate_memory_recency_score(
+                    result.last_accessed_at,
+                    result.updated_at,
+                )
+                print(f"{rank}. [{retrieval_score:.4f}] {result.content}")
                 print(f"   Type: {result.memory_type}")
                 print(f"   Relevance: {result.score:.4f}")
                 print(f"   Importance: {result.importance_score}/5")
-                print(
-                    "   Recency: "
-                    f"{calculate_recency_score(result.last_accessed_at):.3f}"
-                )
+                print(f"   Recency: {recency_score:.3f}")
         print("--------------------------")
         if stored_memory_ids:
-            print("\n--- Stored Memories ---")
-            for scored_memory, memory_id in zip(scored_memories, stored_memory_ids):
-                print("-", scored_memory.content)
-                print("  Type:", scored_memory.memory_type)
-                print("  Importance:", f"{scored_memory.importance_score}/5")
-                print("  ID:", memory_id)
-            print("-----------------------")
+            print("Affected memory IDs:", ", ".join(stored_memory_ids))
         rejected_decisions = [
             decision for decision in policy_decisions if not decision.should_store
         ]
@@ -1254,8 +1476,8 @@ def main() -> None:
                 print("-", decision.candidate.content)
                 print("  Reason:", decision.reason)
             print("--------------------------------")
-        if embedding_error:
-            print("\nMemory storage failed:", embedding_error)
+        if memory_storage_error:
+            print("\nMemory storage failed:", memory_storage_error)
         print("\n--- Memory Status ---")
         print("Newly summarized messages:", memory_stats["newly_summarized_count"])
         print("Context messages sent:", len(memory_stats["context_messages"]))
@@ -1264,8 +1486,7 @@ def main() -> None:
         print("Output tokens:", response.usage.output_tokens)
         print("Summary update tokens:", memory_stats["summary_token_usage"])
         print("Memory extraction tokens:", extraction_tokens)
-        print("Importance scoring tokens:", importance_tokens)
-        print("Embedding input tokens:", embedding_tokens)
+        print("Memory storage tokens:", memory_storage_tokens)
         print("Retrieval embedding tokens:", retrieval_embedding_tokens)
         print("Long-term memories:", long_term_memory.count())
         print("Session total tokens:", memory.session_total_tokens)

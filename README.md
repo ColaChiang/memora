@@ -58,6 +58,7 @@ Agentic Memory
 - Day 21：完成 `Memora v0.18`，在寫入前套用 Memory Policy，分流自動抽取與明確記憶要求，並阻擋敏感或短暫內容。
 - Day 22：完成 `Memora v0.19`，替通過 Policy 的記憶加入 1～5 分 Importance Score，並以 Relevance + Importance 重新排序。
 - Day 23：完成 `Memora v0.20`，以 `last_accessed_at` 與七天 Half-life 將 Recency 納入 Retrieval，並加入可控的 `forget` 指令。
+- Day 24：完成 `Memora v0.21`，在寫入前搜尋相近記憶，區分 create、skip、update、keep_both 與 review，維護長期記憶的一致性與歷史意義。
 
 ## 執行方式
 
@@ -100,3 +101,4 @@ Conversation History 只存在目前 Process；經過抽取的 Long-term Memory 
 - [Day 21｜AI 應該什麼都記住嗎？Memory Policy](https://ithelp.ithome.com.tw/articles/10409577)
 - [Day 22｜Importance Score：哪些記憶比較重要？](https://ithelp.ithome.com.tw/articles/10409812)
 - [Day 23｜AI 也需要遺忘：Memory Decay、Recency 與 Forgetting](https://ithelp.ithome.com.tw/articles/10410230)
+- [Day 24｜AI 記錯了怎麼辦？Deduplication、Update 與 Contradiction](https://ithelp.ithome.com.tw/articles/10410912)
