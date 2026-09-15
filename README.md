@@ -59,6 +59,7 @@ Agentic Memory
 - Day 22：完成 `Memora v0.19`，替通過 Policy 的記憶加入 1～5 分 Importance Score，並以 Relevance + Importance 重新排序。
 - Day 23：完成 `Memora v0.20`，以 `last_accessed_at` 與七天 Half-life 將 Recency 納入 Retrieval，並加入可控的 `forget` 指令。
 - Day 24：完成 `Memora v0.21`，在寫入前搜尋相近記憶，區分 create、skip、update、keep_both 與 review，維護長期記憶的一致性與歷史意義。
+- Day 25：完成 `Memora v0.22`，加入唯讀的 `count_english_words` Function Tool，讓模型可提出一次 Tool Call，由 Application 驗證、執行並回傳結果。
 
 ## 執行方式
 
@@ -72,7 +73,7 @@ export OPENAI_API_KEY="你的 API Key"
 python chatbot.py
 ```
 
-輸入 `history` 可查看目前對話，`memories` 可查看長期記憶及 Importance／Recency，`policy` 可查看最近一次寫入判斷，`search <query>` 可測試語意搜尋，`forget <memory_id>` 可依完整 ID 刪除指定的長期記憶，`profile` 可查看目前使用者設定，`exit` 則結束程式。手動記憶格式為 `remember semantic <內容>` 或 `remember episodic <內容>`。API Key 由環境變數讀取，不會寫進原始碼或 Git repository。
+輸入 `history` 可查看目前對話，`memories` 可查看長期記憶及 Importance／Recency，`policy` 可查看最近一次寫入判斷，`search <query>` 可測試語意搜尋，`forget <memory_id>` 可依完整 ID 刪除指定的長期記憶，`profile` 可查看目前使用者設定，`exit` 則結束程式。手動記憶格式為 `remember semantic <內容>` 或 `remember episodic <內容>`；當問題需要精確計算英文單字時，模型也可呼叫唯讀的 `count_english_words` 工具。API Key 由環境變數讀取，不會寫進原始碼或 Git repository。
 
 Conversation History 只存在目前 Process；經過抽取的 Long-term Memory 會保存在 `memora_db/`，User Profile 則保存在 `user_profile.json`。兩者都已排除於 Git，以免誤提交個人資料。
 
@@ -102,3 +103,4 @@ Conversation History 只存在目前 Process；經過抽取的 Long-term Memory 
 - [Day 22｜Importance Score：哪些記憶比較重要？](https://ithelp.ithome.com.tw/articles/10409812)
 - [Day 23｜AI 也需要遺忘：Memory Decay、Recency 與 Forgetting](https://ithelp.ithome.com.tw/articles/10410230)
 - [Day 24｜AI 記錯了怎麼辦？Deduplication、Update 與 Contradiction](https://ithelp.ithome.com.tw/articles/10410912)
+- [Day 25｜Tool Calling 是什麼？讓 LLM 不只會回答](https://ithelp.ithome.com.tw/articles/10411485)

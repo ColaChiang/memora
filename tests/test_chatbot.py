@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from io import StringIO
 import builtins
 import contextlib
+import json
 import sys
 import tempfile
 import types
@@ -31,6 +32,7 @@ class FakeResponses:
         self.replies = iter(
             ["了解，我會記住。", "你的英文程度是 B1。"]
         )
+        self.create_results: list[object] = []
         self.extraction_result = chatbot.MemoryExtractionResult(
             should_remember=False,
             memories=[],
@@ -51,8 +53,11 @@ class FakeResponses:
 
     def create(self, **kwargs: object) -> object:
         self.calls.append(deepcopy(kwargs))
+        if self.create_results:
+            return self.create_results.pop(0)
         return types.SimpleNamespace(
             output_text=next(self.replies),
+            output=[],
             usage=types.SimpleNamespace(
                 input_tokens=10,
                 output_tokens=5,
@@ -161,6 +166,22 @@ class FakeCollection:
         }
 
 
+def fake_model_response(
+    output_text: str,
+    output: list[object],
+    total_tokens: int,
+) -> object:
+    return types.SimpleNamespace(
+        output_text=output_text,
+        output=output,
+        usage=types.SimpleNamespace(
+            input_tokens=total_tokens - 2,
+            output_tokens=2,
+            total_tokens=total_tokens,
+        ),
+    )
+
+
 class ChatbotTest(unittest.TestCase):
     def test_history_is_sent_on_the_next_request(self) -> None:
         client = FakeClient()
@@ -236,6 +257,91 @@ class ChatbotTest(unittest.TestCase):
         memory.add_user_message("temporary")
         memory.rollback_last_user_message()
         self.assertEqual(memory.history, [])
+
+    def test_count_english_words_treats_contractions_as_one_word(self) -> None:
+        result = chatbot.count_english_words("I don't know the answer.")
+
+        self.assertEqual(result["word_count"], 5)
+        self.assertIn("contractions", result["counting_rule"])
+
+    def test_count_english_words_validates_tool_input(self) -> None:
+        with self.assertRaises(ValueError):
+            chatbot.count_english_words(123)
+        with self.assertRaises(ValueError):
+            chatbot.count_english_words("   ")
+        with self.assertRaises(ValueError):
+            chatbot.count_english_words("a" * (chatbot.COUNT_WORDS_MAX_CHARS + 1))
+
+    def test_execute_tool_call_uses_the_allowlist(self) -> None:
+        success = chatbot.execute_tool_call(
+            types.SimpleNamespace(
+                name="count_english_words",
+                arguments=json.dumps({"text": "I study English every day."}),
+            )
+        )
+        rejected = chatbot.execute_tool_call(
+            types.SimpleNamespace(name="not_registered", arguments="{}")
+        )
+
+        self.assertEqual(json.loads(success)["result"]["word_count"], 5)
+        self.assertTrue(json.loads(success)["ok"])
+        self.assertFalse(json.loads(rejected)["ok"])
+        self.assertEqual(json.loads(rejected)["error"], "unknown tool")
+
+    def test_model_can_answer_without_calling_a_tool(self) -> None:
+        client = FakeClient()
+        client.responses.create_results = [
+            fake_model_response("I have finished my homework.", [], 9)
+        ]
+
+        reply, tokens = chatbot.run_model_with_tools(
+            client,
+            [{"role": "user", "content": "Give me an example."}],
+        )
+
+        self.assertEqual(reply, "I have finished my homework.")
+        self.assertEqual(tokens, 9)
+        self.assertEqual(len(client.responses.calls), 1)
+        self.assertEqual(client.responses.calls[0]["tool_choice"], "auto")
+        self.assertFalse(client.responses.calls[0]["parallel_tool_calls"])
+
+    def test_tool_result_is_returned_with_the_matching_call_id(self) -> None:
+        client = FakeClient()
+        tool_call = types.SimpleNamespace(
+            type="function_call",
+            call_id="call-123",
+            name="count_english_words",
+            arguments=json.dumps({"text": "I study English every day."}),
+        )
+        client.responses.create_results = [
+            fake_model_response("", [tool_call], 11),
+            fake_model_response("這句英文共有 5 個單字。", [], 17),
+        ]
+        input_messages = [
+            {"role": "user", "content": "請精確計算 I study English every day."}
+        ]
+
+        reply, tokens = chatbot.run_model_with_tools(client, input_messages)
+
+        final_call = client.responses.calls[1]
+        function_output = final_call["input"][-1]
+        self.assertEqual(reply, "這句英文共有 5 個單字。")
+        self.assertEqual(tokens, 28)
+        self.assertEqual(final_call["tool_choice"], "none")
+        self.assertEqual(final_call["input"][0], input_messages[0])
+        self.assertEqual(final_call["input"][1].call_id, "call-123")
+        self.assertEqual(function_output["call_id"], "call-123")
+        self.assertEqual(json.loads(function_output["output"])["result"]["word_count"], 5)
+
+    def test_context_budget_includes_reserved_tool_tokens(self) -> None:
+        memory = chatbot.ShortTermMemory(client=FakeClient(), max_input_tokens=50)
+        memory.add_user_message("current question")
+
+        stats = memory.prepare_context(reserved_input_tokens=20)
+
+        self.assertEqual(stats["input_tokens"], 10)
+        self.assertEqual(stats["reserved_input_tokens"], 20)
+        self.assertEqual(stats["estimated_input_tokens"], 30)
 
     def test_remember_command_saves_a_candidate(self) -> None:
         client = FakeClient()

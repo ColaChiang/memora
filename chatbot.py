@@ -1,4 +1,4 @@
-"""Memora v0.21: reconcile incoming memories before writing them."""
+"""Memora v0.22: let the model request one read-only English tool."""
 
 from datetime import datetime, timezone
 import json
@@ -30,7 +30,9 @@ IMPORTANCE_WEIGHT = 0.2
 RECENCY_WEIGHT = 0.1
 RECONCILIATION_TOP_K = 3
 RECONCILIATION_MIN_SCORE = 0.78
-MAX_INPUT_TOKENS = 1000
+COUNT_WORDS_MAX_CHARS = 2000
+TOOL_TURN_TOKEN_RESERVE = 1200
+MAX_INPUT_TOKENS = 4000
 MAX_RECENT_TURNS = 3
 BASE_DIR = Path(__file__).resolve().parent
 MEMORY_DB_PATH = BASE_DIR / "memora_db"
@@ -47,7 +49,58 @@ Guidelines:
 - Use short examples when helpful.
 - Avoid unnecessary technical grammar terminology.
 - Do not add unrelated motivational text.
+
+Tool guidelines:
+- Use an available tool when it can provide a more reliable result than guessing.
+- Never claim that a tool was executed unless the application returned a tool result.
+- Explain the final result clearly and briefly.
 """.strip()
+
+
+def count_english_words(text: str) -> dict[str, object]:
+    if not isinstance(text, str):
+        raise ValueError("text must be a string")
+    if not text.strip():
+        raise ValueError("text must not be empty")
+    if len(text) > COUNT_WORDS_MAX_CHARS:
+        raise ValueError("text is too long")
+
+    words = re.findall(r"[A-Za-z]+(?:['’][A-Za-z]+)?", text)
+    return {
+        "word_count": len(words),
+        "counting_rule": (
+            "English letter sequences; contractions count as one word"
+        ),
+    }
+
+
+TOOLS = [
+    {
+        "type": "function",
+        "name": "count_english_words",
+        "description": (
+            "Count the English words in a piece of text. Use this when the user "
+            "asks for an exact word count."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "text": {
+                    "type": "string",
+                    "description": "The English text to count.",
+                }
+            },
+            "required": ["text"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    }
+]
+
+
+TOOL_HANDLERS = {
+    "count_english_words": count_english_words,
+}
 
 SUMMARY_INSTRUCTIONS = """
 You maintain a compact summary of an ongoing conversation.
@@ -1000,6 +1053,72 @@ def build_background_messages(
     ]
 
 
+def execute_tool_call(tool_call: object) -> str:
+    try:
+        arguments = json.loads(tool_call.arguments)
+        if not isinstance(arguments, dict):
+            raise ValueError("arguments must be an object")
+        handler = TOOL_HANDLERS.get(tool_call.name)
+        if handler is None:
+            raise ValueError("unknown tool")
+        result = handler(**arguments)
+        payload = {"ok": True, "result": result}
+    except (
+        AttributeError,
+        json.JSONDecodeError,
+        KeyError,
+        TypeError,
+        ValueError,
+    ) as error:
+        payload = {"ok": False, "error": str(error)}
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def run_model_with_tools(
+    client: OpenAI,
+    input_messages: list[dict[str, str]],
+) -> tuple[str, int]:
+    response = client.responses.create(
+        model=MODEL,
+        instructions=SYSTEM_PROMPT,
+        input=input_messages,
+        tools=TOOLS,
+        tool_choice="auto",
+        parallel_tool_calls=False,
+    )
+    total_tokens = response.usage.total_tokens
+    function_calls = [
+        item
+        for item in response.output
+        if item.type == "function_call"
+    ]
+    if not function_calls:
+        return response.output_text, total_tokens
+
+    tool_call = function_calls[0]
+    print("Tool called:", tool_call.name)
+    tool_output = execute_tool_call(tool_call)
+    next_input = list(input_messages)
+    next_input += response.output
+    next_input.append(
+        {
+            "type": "function_call_output",
+            "call_id": tool_call.call_id,
+            "output": tool_output,
+        }
+    )
+    final_response = client.responses.create(
+        model=MODEL,
+        instructions=SYSTEM_PROMPT,
+        input=next_input,
+        tools=TOOLS,
+        tool_choice="none",
+        parallel_tool_calls=False,
+    )
+    total_tokens += final_response.usage.total_tokens
+    return final_response.output_text, total_tokens
+
+
 def print_profile_help() -> None:
     print("可用指令：")
     print("profile")
@@ -1125,7 +1244,10 @@ New messages:
     def prepare_context(
         self,
         background_messages: list[dict[str, str]] | None = None,
+        reserved_input_tokens: int = 0,
     ) -> dict[str, object]:
+        if reserved_input_tokens < 0:
+            raise ValueError("reserved_input_tokens must not be negative.")
         if not self.history:
             raise ValueError("Conversation History 是空的。")
         if self.history[-1]["role"] != "user":
@@ -1159,11 +1281,14 @@ New messages:
                 background_messages,
             )
             input_tokens = self.count_input_tokens(context_messages)
+            estimated_input_tokens = input_tokens + reserved_input_tokens
 
-            if input_tokens <= self.max_input_tokens:
+            if estimated_input_tokens <= self.max_input_tokens:
                 return {
                     "context_messages": context_messages,
                     "input_tokens": input_tokens,
+                    "reserved_input_tokens": reserved_input_tokens,
+                    "estimated_input_tokens": estimated_input_tokens,
                     "summary_token_usage": summary_token_usage,
                     "newly_summarized_count": newly_summarized_count,
                 }
@@ -1220,7 +1345,7 @@ def main() -> None:
     last_extraction_output = ""
     last_policy_output = ""
 
-    print("Memora v0.21")
+    print("Memora v0.22")
     print(
         "Commands: history, context, summary, status, "
         "remember <semantic|episodic> <text>, memories, extraction, policy, "
@@ -1240,6 +1365,7 @@ def main() -> None:
         stored_memory_ids: list[str] = []
         retrieved_memories: list[MemorySearchResult] = []
         retrieval_embedding_tokens = 0
+        response_tokens = 0
 
         if command == "exit":
             print("Bye!")
@@ -1391,18 +1517,17 @@ def main() -> None:
             )
             memory_stats = memory.prepare_context(
                 background_messages=background_messages,
+                reserved_input_tokens=TOOL_TURN_TOKEN_RESERVE,
             )
-            response = client.responses.create(
-                model=MODEL,
-                instructions=SYSTEM_PROMPT,
-                input=memory_stats["context_messages"],
+            assistant_reply, response_tokens = run_model_with_tools(
+                client,
+                input_messages=memory_stats["context_messages"],
             )
         except Exception as error:
             memory.rollback_last_user_message()
             print("Request failed:", error)
             continue
 
-        assistant_reply = response.output_text
         try:
             long_term_memory.touch(
                 [memory_item.memory_id for memory_item in retrieved_memories]
@@ -1412,7 +1537,7 @@ def main() -> None:
         memory.finish_turn(
             assistant_reply=assistant_reply,
             context_messages=memory_stats["context_messages"],
-            response_tokens=response.usage.total_tokens,
+            response_tokens=response_tokens,
         )
 
         extracted_candidates: list[MemoryCandidate] = []
@@ -1482,8 +1607,9 @@ def main() -> None:
         print("Newly summarized messages:", memory_stats["newly_summarized_count"])
         print("Context messages sent:", len(memory_stats["context_messages"]))
         print("Counted input tokens:", memory_stats["input_tokens"])
-        print("Actual input tokens:", response.usage.input_tokens)
-        print("Output tokens:", response.usage.output_tokens)
+        print("Reserved tool tokens:", memory_stats["reserved_input_tokens"])
+        print("Estimated input tokens:", memory_stats["estimated_input_tokens"])
+        print("Model response tokens:", response_tokens)
         print("Summary update tokens:", memory_stats["summary_token_usage"])
         print("Memory extraction tokens:", extraction_tokens)
         print("Memory storage tokens:", memory_storage_tokens)
