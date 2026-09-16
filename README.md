@@ -60,6 +60,7 @@ Agentic Memory
 - Day 23：完成 `Memora v0.20`，以 `last_accessed_at` 與七天 Half-life 將 Recency 納入 Retrieval，並加入可控的 `forget` 指令。
 - Day 24：完成 `Memora v0.21`，在寫入前搜尋相近記憶，區分 create、skip、update、keep_both 與 review，維護長期記憶的一致性與歷史意義。
 - Day 25：完成 `Memora v0.22`，加入唯讀的 `count_english_words` Function Tool，讓模型可提出一次 Tool Call，由 Application 驗證、執行並回傳結果。
+- Day 26：完成 [Chatbot 與 Agent 架構檢查](Day26_Chatbot_vs_Agent.md)，確認目前是固定 Workflow 的 Tool-using Chatbot，保留 `Memora v0.22`，不提前加入 Day 27 的 Agent Loop。
 
 ## 執行方式
 
@@ -104,3 +105,4 @@ Conversation History 只存在目前 Process；經過抽取的 Long-term Memory 
 - [Day 23｜AI 也需要遺忘：Memory Decay、Recency 與 Forgetting](https://ithelp.ithome.com.tw/articles/10410230)
 - [Day 24｜AI 記錯了怎麼辦？Deduplication、Update 與 Contradiction](https://ithelp.ithome.com.tw/articles/10410912)
 - [Day 25｜Tool Calling 是什麼？讓 LLM 不只會回答](https://ithelp.ithome.com.tw/articles/10411485)
+- [Day 26｜Agent 到底和 Chatbot 差在哪？](https://ithelp.ithome.com.tw/articles/10412270)
