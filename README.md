@@ -61,6 +61,7 @@ Agentic Memory
 - Day 24：完成 `Memora v0.21`，在寫入前搜尋相近記憶，區分 create、skip、update、keep_both 與 review，維護長期記憶的一致性與歷史意義。
 - Day 25：完成 `Memora v0.22`，加入唯讀的 `count_english_words` Function Tool，讓模型可提出一次 Tool Call，由 Application 驗證、執行並回傳結果。
 - Day 26：完成 [Chatbot 與 Agent 架構檢查](Day26_Chatbot_vs_Agent.md)，確認目前是固定 Workflow 的 Tool-using Chatbot，保留 `Memora v0.22`，不提前加入 Day 27 的 Agent Loop。
+- Day 27：完成 `Memora v0.23`，將單次 Tool Calling 改為最多四個 Actions 的 Agent Loop，讓模型能根據 Observation 繼續決策，並記錄 Tool Steps、Token Usage 與 Stop Reason。
 
 ## 執行方式
 
@@ -74,7 +75,7 @@ export OPENAI_API_KEY="你的 API Key"
 python chatbot.py
 ```
 
-輸入 `history` 可查看目前對話，`memories` 可查看長期記憶及 Importance／Recency，`policy` 可查看最近一次寫入判斷，`search <query>` 可測試語意搜尋，`forget <memory_id>` 可依完整 ID 刪除指定的長期記憶，`profile` 可查看目前使用者設定，`exit` 則結束程式。手動記憶格式為 `remember semantic <內容>` 或 `remember episodic <內容>`；當問題需要精確計算英文單字時，模型也可呼叫唯讀的 `count_english_words` 工具。API Key 由環境變數讀取，不會寫進原始碼或 Git repository。
+輸入 `history` 可查看目前對話，`memories` 可查看長期記憶及 Importance／Recency，`policy` 可查看最近一次寫入判斷，`search <query>` 可測試語意搜尋，`forget <memory_id>` 可依完整 ID 刪除指定的長期記憶，`profile` 可查看目前使用者設定，`exit` 則結束程式。手動記憶格式為 `remember semantic <內容>` 或 `remember episodic <內容>`；當問題需要精確計算英文單字時，模型可在單次 Agent Run 中重複呼叫唯讀的 `count_english_words` 工具，最多執行四個 Tool Steps。API Key 由環境變數讀取，不會寫進原始碼或 Git repository。
 
 Conversation History 只存在目前 Process；經過抽取的 Long-term Memory 會保存在 `memora_db/`，User Profile 則保存在 `user_profile.json`。兩者都已排除於 Git，以免誤提交個人資料。
 
@@ -106,3 +107,4 @@ Conversation History 只存在目前 Process；經過抽取的 Long-term Memory 
 - [Day 24｜AI 記錯了怎麼辦？Deduplication、Update 與 Contradiction](https://ithelp.ithome.com.tw/articles/10410912)
 - [Day 25｜Tool Calling 是什麼？讓 LLM 不只會回答](https://ithelp.ithome.com.tw/articles/10411485)
 - [Day 26｜Agent 到底和 Chatbot 差在哪？](https://ithelp.ithome.com.tw/articles/10412270)
+- [Day 27｜打造 Agent Loop：Action、Observation 與 Stop](https://ithelp.ithome.com.tw/articles/10412918)

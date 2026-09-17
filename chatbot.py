@@ -1,4 +1,4 @@
-"""Memora v0.22: let the model request one read-only English tool."""
+"""Memora v0.23: run read-only tools in a bounded agent loop."""
 
 from datetime import datetime, timezone
 import json
@@ -31,8 +31,10 @@ RECENCY_WEIGHT = 0.1
 RECONCILIATION_TOP_K = 3
 RECONCILIATION_MIN_SCORE = 0.78
 COUNT_WORDS_MAX_CHARS = 2000
-TOOL_TURN_TOKEN_RESERVE = 1200
-MAX_INPUT_TOKENS = 4000
+MAX_AGENT_STEPS = 4
+TOOL_STEP_TOKEN_RESERVE = 1200
+AGENT_TURN_TOKEN_RESERVE = TOOL_STEP_TOKEN_RESERVE * MAX_AGENT_STEPS
+MAX_INPUT_TOKENS = 8000
 MAX_RECENT_TURNS = 3
 BASE_DIR = Path(__file__).resolve().parent
 MEMORY_DB_PATH = BASE_DIR / "memora_db"
@@ -54,6 +56,9 @@ Tool guidelines:
 - Use an available tool when it can provide a more reliable result than guessing.
 - Never claim that a tool was executed unless the application returned a tool result.
 - Explain the final result clearly and briefly.
+- After receiving a tool result, decide whether another tool call is necessary.
+- Stop calling tools when the available results are sufficient to answer the user.
+- Do not repeat a successful tool call with the same arguments unless it is necessary.
 """.strip()
 
 
@@ -1077,46 +1082,74 @@ def execute_tool_call(tool_call: object) -> str:
 def run_model_with_tools(
     client: OpenAI,
     input_messages: list[dict[str, str]],
-) -> tuple[str, int]:
-    response = client.responses.create(
-        model=MODEL,
-        instructions=SYSTEM_PROMPT,
-        input=input_messages,
-        tools=TOOLS,
-        tool_choice="auto",
-        parallel_tool_calls=False,
-    )
-    total_tokens = response.usage.total_tokens
-    function_calls = [
-        item
-        for item in response.output
-        if item.type == "function_call"
-    ]
-    if not function_calls:
-        return response.output_text, total_tokens
+) -> dict[str, object]:
+    working_input = list(input_messages)
+    total_tokens = 0
+    tool_steps = 0
 
-    tool_call = function_calls[0]
-    print("Tool called:", tool_call.name)
-    tool_output = execute_tool_call(tool_call)
-    next_input = list(input_messages)
-    next_input += response.output
-    next_input.append(
-        {
-            "type": "function_call_output",
-            "call_id": tool_call.call_id,
-            "output": tool_output,
-        }
-    )
-    final_response = client.responses.create(
-        model=MODEL,
-        instructions=SYSTEM_PROMPT,
-        input=next_input,
-        tools=TOOLS,
-        tool_choice="none",
-        parallel_tool_calls=False,
-    )
-    total_tokens += final_response.usage.total_tokens
-    return final_response.output_text, total_tokens
+    while True:
+        try:
+            response = client.responses.create(
+                model=MODEL,
+                instructions=SYSTEM_PROMPT,
+                input=working_input,
+                tools=TOOLS,
+                tool_choice="auto",
+                parallel_tool_calls=False,
+            )
+        except Exception as error:
+            print("Agent API error:", error)
+            return {
+                "reply": "目前無法完成這個任務，請稍後再試。",
+                "response_tokens": total_tokens,
+                "tool_steps": tool_steps,
+                "stop_reason": "api_error",
+            }
+
+        total_tokens += response.usage.total_tokens
+        function_calls = [
+            item
+            for item in response.output
+            if item.type == "function_call"
+        ]
+
+        if not function_calls:
+            final_answer = (response.output_text or "").strip()
+            if not final_answer:
+                return {
+                    "reply": "這次沒有取得可顯示的回答。",
+                    "response_tokens": total_tokens,
+                    "tool_steps": tool_steps,
+                    "stop_reason": "empty_response",
+                }
+            return {
+                "reply": final_answer,
+                "response_tokens": total_tokens,
+                "tool_steps": tool_steps,
+                "stop_reason": "final_answer",
+            }
+
+        if tool_steps >= MAX_AGENT_STEPS:
+            return {
+                "reply": "我已達到這次任務的步數上限，因此先停止執行。",
+                "response_tokens": total_tokens,
+                "tool_steps": tool_steps,
+                "stop_reason": "max_steps",
+            }
+
+        working_input += response.output
+        tool_call = function_calls[0]
+        tool_steps += 1
+        print(f"[Agent step {tool_steps}] Action: {tool_call.name}")
+        tool_output = execute_tool_call(tool_call)
+        print(f"[Agent step {tool_steps}] Observation: {tool_output}")
+        working_input.append(
+            {
+                "type": "function_call_output",
+                "call_id": tool_call.call_id,
+                "output": tool_output,
+            }
+        )
 
 
 def print_profile_help() -> None:
@@ -1345,7 +1378,7 @@ def main() -> None:
     last_extraction_output = ""
     last_policy_output = ""
 
-    print("Memora v0.22")
+    print("Memora v0.23")
     print(
         "Commands: history, context, summary, status, "
         "remember <semantic|episodic> <text>, memories, extraction, policy, "
@@ -1517,11 +1550,18 @@ def main() -> None:
             )
             memory_stats = memory.prepare_context(
                 background_messages=background_messages,
-                reserved_input_tokens=TOOL_TURN_TOKEN_RESERVE,
+                reserved_input_tokens=AGENT_TURN_TOKEN_RESERVE,
             )
-            assistant_reply, response_tokens = run_model_with_tools(
+            agent_result = run_model_with_tools(
                 client,
                 input_messages=memory_stats["context_messages"],
+            )
+            assistant_reply = str(agent_result["reply"])
+            response_tokens = int(agent_result["response_tokens"])
+            print(
+                "Agent stopped:",
+                agent_result["stop_reason"],
+                f"({agent_result['tool_steps']} tool steps)",
             )
         except Exception as error:
             memory.rollback_last_user_message()
@@ -1607,7 +1647,7 @@ def main() -> None:
         print("Newly summarized messages:", memory_stats["newly_summarized_count"])
         print("Context messages sent:", len(memory_stats["context_messages"]))
         print("Counted input tokens:", memory_stats["input_tokens"])
-        print("Reserved tool tokens:", memory_stats["reserved_input_tokens"])
+        print("Reserved agent tokens:", memory_stats["reserved_input_tokens"])
         print("Estimated input tokens:", memory_stats["estimated_input_tokens"])
         print("Model response tokens:", response_tokens)
         print("Summary update tokens:", memory_stats["summary_token_usage"])

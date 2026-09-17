@@ -1,4 +1,4 @@
-"""Tests for Memora's in-session conversation history."""
+"""Tests for Memora's memory and agent behavior."""
 
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
@@ -294,13 +294,15 @@ class ChatbotTest(unittest.TestCase):
             fake_model_response("I have finished my homework.", [], 9)
         ]
 
-        reply, tokens = chatbot.run_model_with_tools(
+        result = chatbot.run_model_with_tools(
             client,
             [{"role": "user", "content": "Give me an example."}],
         )
 
-        self.assertEqual(reply, "I have finished my homework.")
-        self.assertEqual(tokens, 9)
+        self.assertEqual(result["reply"], "I have finished my homework.")
+        self.assertEqual(result["response_tokens"], 9)
+        self.assertEqual(result["tool_steps"], 0)
+        self.assertEqual(result["stop_reason"], "final_answer")
         self.assertEqual(len(client.responses.calls), 1)
         self.assertEqual(client.responses.calls[0]["tool_choice"], "auto")
         self.assertFalse(client.responses.calls[0]["parallel_tool_calls"])
@@ -321,17 +323,128 @@ class ChatbotTest(unittest.TestCase):
             {"role": "user", "content": "請精確計算 I study English every day."}
         ]
 
-        reply, tokens = chatbot.run_model_with_tools(client, input_messages)
+        result = chatbot.run_model_with_tools(client, input_messages)
 
         final_call = client.responses.calls[1]
         function_output = final_call["input"][-1]
-        self.assertEqual(reply, "這句英文共有 5 個單字。")
-        self.assertEqual(tokens, 28)
-        self.assertEqual(final_call["tool_choice"], "none")
+        self.assertEqual(result["reply"], "這句英文共有 5 個單字。")
+        self.assertEqual(result["response_tokens"], 28)
+        self.assertEqual(result["tool_steps"], 1)
+        self.assertEqual(result["stop_reason"], "final_answer")
+        self.assertEqual(final_call["tool_choice"], "auto")
         self.assertEqual(final_call["input"][0], input_messages[0])
         self.assertEqual(final_call["input"][1].call_id, "call-123")
         self.assertEqual(function_output["call_id"], "call-123")
         self.assertEqual(json.loads(function_output["output"])["result"]["word_count"], 5)
+
+    def test_agent_loop_can_execute_consecutive_tool_calls(self) -> None:
+        client = FakeClient()
+        first_call = types.SimpleNamespace(
+            type="function_call",
+            call_id="call-a",
+            name="count_english_words",
+            arguments=json.dumps({"text": "I study English every day."}),
+        )
+        second_call = types.SimpleNamespace(
+            type="function_call",
+            call_id="call-b",
+            name="count_english_words",
+            arguments=json.dumps(
+                {"text": "I have studied English for three years."}
+            ),
+        )
+        client.responses.create_results = [
+            fake_model_response("", [first_call], 11),
+            fake_model_response("", [second_call], 13),
+            fake_model_response("B 比 A 多 2 個單字。", [], 17),
+        ]
+
+        result = chatbot.run_model_with_tools(
+            client,
+            [{"role": "user", "content": "請比較 A 和 B 的英文單字數量。"}],
+        )
+
+        final_input = client.responses.calls[2]["input"]
+        self.assertEqual(result["reply"], "B 比 A 多 2 個單字。")
+        self.assertEqual(result["response_tokens"], 41)
+        self.assertEqual(result["tool_steps"], 2)
+        self.assertEqual(result["stop_reason"], "final_answer")
+        self.assertTrue(
+            all(
+                call["tool_choice"] == "auto"
+                for call in client.responses.calls
+            )
+        )
+        self.assertEqual(final_input[2]["call_id"], "call-a")
+        self.assertEqual(final_input[4]["call_id"], "call-b")
+
+    def test_agent_loop_stops_before_executing_a_tool_beyond_the_limit(self) -> None:
+        client = FakeClient()
+        first_call = types.SimpleNamespace(
+            type="function_call",
+            call_id="call-1",
+            name="count_english_words",
+            arguments=json.dumps({"text": "First sentence."}),
+        )
+        blocked_call = types.SimpleNamespace(
+            type="function_call",
+            call_id="call-2",
+            name="count_english_words",
+            arguments=json.dumps({"text": "Second sentence."}),
+        )
+        client.responses.create_results = [
+            fake_model_response("", [first_call], 11),
+            fake_model_response("", [blocked_call], 13),
+        ]
+
+        with (
+            patch.object(chatbot, "MAX_AGENT_STEPS", 1),
+            patch.object(
+                chatbot,
+                "execute_tool_call",
+                wraps=chatbot.execute_tool_call,
+            ) as execute_tool,
+        ):
+            result = chatbot.run_model_with_tools(
+                client,
+                [{"role": "user", "content": "Count both sentences."}],
+            )
+
+        self.assertEqual(result["stop_reason"], "max_steps")
+        self.assertEqual(result["tool_steps"], 1)
+        self.assertEqual(result["response_tokens"], 24)
+        self.assertEqual(execute_tool.call_count, 1)
+        self.assertEqual(len(client.responses.calls), 2)
+
+    def test_agent_loop_reports_api_errors(self) -> None:
+        client = FakeClient()
+
+        with patch.object(
+            client.responses,
+            "create",
+            side_effect=RuntimeError("offline"),
+        ):
+            result = chatbot.run_model_with_tools(
+                client,
+                [{"role": "user", "content": "Count these words."}],
+            )
+
+        self.assertEqual(result["stop_reason"], "api_error")
+        self.assertEqual(result["tool_steps"], 0)
+        self.assertEqual(result["response_tokens"], 0)
+
+    def test_agent_loop_rejects_an_empty_final_response(self) -> None:
+        client = FakeClient()
+        client.responses.create_results = [fake_model_response("   ", [], 7)]
+
+        result = chatbot.run_model_with_tools(
+            client,
+            [{"role": "user", "content": "Answer me."}],
+        )
+
+        self.assertEqual(result["stop_reason"], "empty_response")
+        self.assertEqual(result["tool_steps"], 0)
+        self.assertEqual(result["response_tokens"], 7)
 
     def test_context_budget_includes_reserved_tool_tokens(self) -> None:
         memory = chatbot.ShortTermMemory(client=FakeClient(), max_input_tokens=50)
