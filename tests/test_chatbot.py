@@ -166,6 +166,10 @@ class FakeCollection:
         }
 
 
+def fake_memory_store() -> chatbot.LongTermMemoryStore:
+    return chatbot.LongTermMemoryStore("", "", FakeCollection())
+
+
 def fake_model_response(
     output_text: str,
     output: list[object],
@@ -273,20 +277,72 @@ class ChatbotTest(unittest.TestCase):
             chatbot.count_english_words("a" * (chatbot.COUNT_WORDS_MAX_CHARS + 1))
 
     def test_execute_tool_call_uses_the_allowlist(self) -> None:
-        success = chatbot.execute_tool_call(
+        success, success_tokens, success_memory_ids = chatbot.execute_tool_call(
             types.SimpleNamespace(
                 name="count_english_words",
                 arguments=json.dumps({"text": "I study English every day."}),
             )
         )
-        rejected = chatbot.execute_tool_call(
+        rejected, rejected_tokens, rejected_memory_ids = chatbot.execute_tool_call(
             types.SimpleNamespace(name="not_registered", arguments="{}")
         )
 
         self.assertEqual(json.loads(success)["result"]["word_count"], 5)
         self.assertTrue(json.loads(success)["ok"])
+        self.assertEqual(success_tokens, 0)
+        self.assertEqual(success_memory_ids, [])
         self.assertFalse(json.loads(rejected)["ok"])
         self.assertEqual(json.loads(rejected)["error"], "unknown tool")
+        self.assertEqual(rejected_tokens, 0)
+        self.assertEqual(rejected_memory_ids, [])
+
+    def test_search_memory_returns_public_data_and_runtime_metadata(self) -> None:
+        client = FakeClient()
+        collection = FakeCollection()
+        store = chatbot.LongTermMemoryStore("", "", collection)
+        memory_id = store.add(
+            [
+                chatbot.EmbeddedMemoryCandidate(
+                    content="The user often confuses check-in and check-out.",
+                    memory_type="semantic",
+                    importance_score=4,
+                    embedding=[1.0],
+                )
+            ],
+            source="automatic",
+        )[0]
+        before = deepcopy(collection.records)
+
+        result = chatbot.search_memory(
+            client,
+            store,
+            "the user's travel English weakness",
+        )
+
+        public_memory = result.data["memories"][0]
+        self.assertEqual(result.data["count"], 1)
+        self.assertEqual(public_memory["memory_id"], memory_id)
+        self.assertEqual(public_memory["memory_type"], "semantic")
+        self.assertEqual(public_memory["importance_score"], 4)
+        self.assertEqual(public_memory["semantic_similarity"], 0.9)
+        self.assertEqual(result.token_usage, 3)
+        self.assertEqual(result.used_memory_ids, [memory_id])
+        self.assertEqual(collection.records, before)
+
+    def test_search_memory_validates_the_agent_query(self) -> None:
+        client = FakeClient()
+        store = fake_memory_store()
+
+        with self.assertRaises(ValueError):
+            chatbot.search_memory(client, store, 123)
+        with self.assertRaises(ValueError):
+            chatbot.search_memory(client, store, "   ")
+        with self.assertRaises(ValueError):
+            chatbot.search_memory(
+                client,
+                store,
+                "q" * (chatbot.MEMORY_SEARCH_MAX_CHARS + 1),
+            )
 
     def test_model_can_answer_without_calling_a_tool(self) -> None:
         client = FakeClient()
@@ -297,11 +353,14 @@ class ChatbotTest(unittest.TestCase):
         result = chatbot.run_model_with_tools(
             client,
             [{"role": "user", "content": "Give me an example."}],
+            fake_memory_store(),
         )
 
         self.assertEqual(result["reply"], "I have finished my homework.")
         self.assertEqual(result["response_tokens"], 9)
+        self.assertEqual(result["tool_tokens"], 0)
         self.assertEqual(result["tool_steps"], 0)
+        self.assertEqual(result["used_memory_ids"], [])
         self.assertEqual(result["stop_reason"], "final_answer")
         self.assertEqual(len(client.responses.calls), 1)
         self.assertEqual(client.responses.calls[0]["tool_choice"], "auto")
@@ -323,13 +382,19 @@ class ChatbotTest(unittest.TestCase):
             {"role": "user", "content": "請精確計算 I study English every day."}
         ]
 
-        result = chatbot.run_model_with_tools(client, input_messages)
+        result = chatbot.run_model_with_tools(
+            client,
+            input_messages,
+            fake_memory_store(),
+        )
 
         final_call = client.responses.calls[1]
         function_output = final_call["input"][-1]
         self.assertEqual(result["reply"], "這句英文共有 5 個單字。")
         self.assertEqual(result["response_tokens"], 28)
+        self.assertEqual(result["tool_tokens"], 0)
         self.assertEqual(result["tool_steps"], 1)
+        self.assertEqual(result["used_memory_ids"], [])
         self.assertEqual(result["stop_reason"], "final_answer")
         self.assertEqual(final_call["tool_choice"], "auto")
         self.assertEqual(final_call["input"][0], input_messages[0])
@@ -362,12 +427,15 @@ class ChatbotTest(unittest.TestCase):
         result = chatbot.run_model_with_tools(
             client,
             [{"role": "user", "content": "請比較 A 和 B 的英文單字數量。"}],
+            fake_memory_store(),
         )
 
         final_input = client.responses.calls[2]["input"]
         self.assertEqual(result["reply"], "B 比 A 多 2 個單字。")
         self.assertEqual(result["response_tokens"], 41)
+        self.assertEqual(result["tool_tokens"], 0)
         self.assertEqual(result["tool_steps"], 2)
+        self.assertEqual(result["used_memory_ids"], [])
         self.assertEqual(result["stop_reason"], "final_answer")
         self.assertTrue(
             all(
@@ -377,6 +445,62 @@ class ChatbotTest(unittest.TestCase):
         )
         self.assertEqual(final_input[2]["call_id"], "call-a")
         self.assertEqual(final_input[4]["call_id"], "call-b")
+
+    def test_agent_can_search_memory_then_use_another_tool(self) -> None:
+        client = FakeClient()
+        store = fake_memory_store()
+        memory_id = store.add(
+            [
+                chatbot.EmbeddedMemoryCandidate(
+                    content="The user often confuses check-in and check-out.",
+                    memory_type="semantic",
+                    importance_score=4,
+                    embedding=[1.0],
+                )
+            ],
+            source="automatic",
+        )[0]
+        search_call = types.SimpleNamespace(
+            type="function_call",
+            call_id="search-1",
+            name="search_memory",
+            arguments=json.dumps({"query": "travel English weakness"}),
+        )
+        count_call = types.SimpleNamespace(
+            type="function_call",
+            call_id="count-1",
+            name="count_english_words",
+            arguments=json.dumps(
+                {"text": "The user often confuses check-in and check-out."}
+            ),
+        )
+        client.responses.create_results = [
+            fake_model_response("", [search_call], 11),
+            fake_model_response("", [count_call], 13),
+            fake_model_response("找到相關記憶，該句共有 9 個英文單字。", [], 17),
+        ]
+
+        result = chatbot.run_model_with_tools(
+            client,
+            [{"role": "user", "content": "找出我的旅遊英文弱點並計算單字。"}],
+            store,
+        )
+
+        search_observation = json.loads(
+            client.responses.calls[1]["input"][-1]["output"]
+        )
+        self.assertEqual(result["stop_reason"], "final_answer")
+        self.assertEqual(result["tool_steps"], 2)
+        self.assertEqual(result["response_tokens"], 41)
+        self.assertEqual(result["tool_tokens"], 3)
+        self.assertEqual(result["used_memory_ids"], [memory_id])
+        self.assertEqual(search_observation["result"]["count"], 1)
+        self.assertNotIn("token_usage", search_observation["result"])
+        self.assertNotIn("used_memory_ids", search_observation["result"])
+        self.assertEqual(
+            search_observation["result"]["memories"][0]["memory_id"],
+            memory_id,
+        )
 
     def test_agent_loop_stops_before_executing_a_tool_beyond_the_limit(self) -> None:
         client = FakeClient()
@@ -408,11 +532,14 @@ class ChatbotTest(unittest.TestCase):
             result = chatbot.run_model_with_tools(
                 client,
                 [{"role": "user", "content": "Count both sentences."}],
+                fake_memory_store(),
             )
 
         self.assertEqual(result["stop_reason"], "max_steps")
         self.assertEqual(result["tool_steps"], 1)
         self.assertEqual(result["response_tokens"], 24)
+        self.assertEqual(result["tool_tokens"], 0)
+        self.assertEqual(result["used_memory_ids"], [])
         self.assertEqual(execute_tool.call_count, 1)
         self.assertEqual(len(client.responses.calls), 2)
 
@@ -427,11 +554,43 @@ class ChatbotTest(unittest.TestCase):
             result = chatbot.run_model_with_tools(
                 client,
                 [{"role": "user", "content": "Count these words."}],
+                fake_memory_store(),
             )
 
         self.assertEqual(result["stop_reason"], "api_error")
         self.assertEqual(result["tool_steps"], 0)
         self.assertEqual(result["response_tokens"], 0)
+        self.assertEqual(result["tool_tokens"], 0)
+        self.assertEqual(result["used_memory_ids"], [])
+
+    def test_agent_loop_reports_unexpected_tool_errors(self) -> None:
+        client = FakeClient()
+        tool_call = types.SimpleNamespace(
+            type="function_call",
+            call_id="call-error",
+            name="count_english_words",
+            arguments=json.dumps({"text": "Count me."}),
+        )
+        client.responses.create_results = [
+            fake_model_response("", [tool_call], 11)
+        ]
+
+        with patch.object(
+            chatbot,
+            "execute_tool_call",
+            side_effect=RuntimeError("unexpected failure"),
+        ):
+            result = chatbot.run_model_with_tools(
+                client,
+                [{"role": "user", "content": "Count these words."}],
+                fake_memory_store(),
+            )
+
+        self.assertEqual(result["stop_reason"], "tool_error")
+        self.assertEqual(result["tool_steps"], 1)
+        self.assertEqual(result["response_tokens"], 11)
+        self.assertEqual(result["tool_tokens"], 0)
+        self.assertEqual(result["used_memory_ids"], [])
 
     def test_agent_loop_rejects_an_empty_final_response(self) -> None:
         client = FakeClient()
@@ -440,11 +599,14 @@ class ChatbotTest(unittest.TestCase):
         result = chatbot.run_model_with_tools(
             client,
             [{"role": "user", "content": "Answer me."}],
+            fake_memory_store(),
         )
 
         self.assertEqual(result["stop_reason"], "empty_response")
         self.assertEqual(result["tool_steps"], 0)
         self.assertEqual(result["response_tokens"], 7)
+        self.assertEqual(result["tool_tokens"], 0)
+        self.assertEqual(result["used_memory_ids"], [])
 
     def test_context_budget_includes_reserved_tool_tokens(self) -> None:
         memory = chatbot.ShortTermMemory(client=FakeClient(), max_input_tokens=50)
