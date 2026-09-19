@@ -63,6 +63,7 @@ Agentic Memory
 - Day 26：完成 [Chatbot 與 Agent 架構檢查](Day26_Chatbot_vs_Agent.md)，確認目前是固定 Workflow 的 Tool-using Chatbot，保留 `Memora v0.22`，不提前加入 Day 27 的 Agent Loop。
 - Day 27：完成 `Memora v0.23`，將單次 Tool Calling 改為最多四個 Actions 的 Agent Loop，讓模型能根據 Observation 繼續決策，並記錄 Tool Steps、Token Usage 與 Stop Reason。
 - Day 28：完成 `Memora v0.24`，把既有 Long-term Memory Retrieval 封裝成唯讀的 `search_memory` Tool，讓 Agent 能在初始 Context 不足時主動提出精確查詢，同時保留 Retrieval Policy、Token Usage 與 Recency 更新邊界。
+- Day 29：完成 `Memora v0.25`，讓 Agent 自行選擇 `search_memory`、`remember_memory` 與 `request_forget_memory`；寫入會先成為 Pending Action，只有成功回答後才經 Policy、Importance 與 Reconciliation 提交，刪除則必須再由使用者確認。
 
 ## 執行方式
 
@@ -76,7 +77,7 @@ export OPENAI_API_KEY="你的 API Key"
 python chatbot.py
 ```
 
-輸入 `history` 可查看目前對話，`memories` 可查看長期記憶及 Importance／Recency，`policy` 可查看最近一次寫入判斷，`search <query>` 可測試語意搜尋，`forget <memory_id>` 可依完整 ID 刪除指定的長期記憶，`profile` 可查看目前使用者設定，`exit` 則結束程式。手動記憶格式為 `remember semantic <內容>` 或 `remember episodic <內容>`；Agent 可在單次 Run 中依需要呼叫唯讀的 `search_memory` 與 `count_english_words`，最多執行四個 Tool Steps。API Key 由環境變數讀取，不會寫進原始碼或 Git repository。
+輸入 `history` 可查看目前對話，`memories` 可查看長期記憶及 Importance／Recency，`policy` 可查看最近一次手動寫入判斷，`search <query>` 可測試語意搜尋，`profile` 可查看目前使用者設定，`exit` 則結束程式。手動記憶格式為 `remember semantic <內容>` 或 `remember episodic <內容>`；一般聊天不再固定檢索或抽取長期記憶，Agent 會在最多四個 Tool Steps 內自行選擇 `search_memory`、`remember_memory`、`request_forget_memory` 或 `count_english_words`。Agent 提出的記憶只有在 Final Answer 成功後才會提交，忘記請求也必須由使用者再次確認。API Key 由環境變數讀取，不會寫進原始碼或 Git repository。
 
 Conversation History 只存在目前 Process；經過抽取的 Long-term Memory 會保存在 `memora_db/`，User Profile 則保存在 `user_profile.json`。兩者都已排除於 Git，以免誤提交個人資料。
 
@@ -110,3 +111,4 @@ Conversation History 只存在目前 Process；經過抽取的 Long-term Memory 
 - [Day 26｜Agent 到底和 Chatbot 差在哪？](https://ithelp.ithome.com.tw/articles/10412270)
 - [Day 27｜打造 Agent Loop：Action、Observation 與 Stop](https://ithelp.ithome.com.tw/articles/10412918)
 - [Day 28｜Memory × Tool × Agent：第一次走向 Agentic Memory](https://ithelp.ithome.com.tw/articles/10413496)
+- [Day 29｜Agentic Memory：讓 Agent 自己決定何時記、何時找、何時忘](https://ithelp.ithome.com.tw/articles/10414086)

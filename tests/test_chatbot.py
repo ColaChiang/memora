@@ -231,8 +231,34 @@ class ChatbotTest(unittest.TestCase):
         self.assertEqual(len(second_input), 3)
         self.assertEqual(second_input[1]["role"], "assistant")
         self.assertIn("assistant: 你的英文程度是 B1。", output.getvalue())
-        self.assertIn("Session total tokens: 50", output.getvalue())
+        self.assertIn("Session total tokens: 30", output.getvalue())
         self.assertIn("Bye!", output.getvalue())
+
+    def test_regular_chat_does_not_run_automatic_retrieval_or_extraction(self) -> None:
+        client = FakeClient()
+        inputs = iter(["Explain present perfect.", "exit"])
+
+        with (
+            patch.object(chatbot, "OpenAI", return_value=client),
+            patch.object(
+                chatbot,
+                "create_long_term_memory_store",
+                return_value=fake_memory_store(),
+            ),
+            patch.object(
+                chatbot,
+                "create_user_profile_store",
+                return_value=chatbot.UserProfileStore(chatbot.Path("missing-profile.json")),
+            ),
+            patch.object(chatbot, "retrieve_relevant_memories") as retrieval,
+            patch.object(chatbot, "extract_memory_candidates") as extraction,
+            patch.object(builtins, "input", side_effect=lambda _="": next(inputs)),
+            contextlib.redirect_stdout(StringIO()),
+        ):
+            chatbot.main()
+
+        retrieval.assert_not_called()
+        extraction.assert_not_called()
 
     def test_old_turns_are_summarized_and_recent_turns_stay_verbatim(self) -> None:
         client = FakeClient()
@@ -277,13 +303,23 @@ class ChatbotTest(unittest.TestCase):
             chatbot.count_english_words("a" * (chatbot.COUNT_WORDS_MAX_CHARS + 1))
 
     def test_execute_tool_call_uses_the_allowlist(self) -> None:
-        success, success_tokens, success_memory_ids = chatbot.execute_tool_call(
+        (
+            success,
+            success_tokens,
+            success_memory_ids,
+            success_pending_actions,
+        ) = chatbot.execute_tool_call(
             types.SimpleNamespace(
                 name="count_english_words",
                 arguments=json.dumps({"text": "I study English every day."}),
             )
         )
-        rejected, rejected_tokens, rejected_memory_ids = chatbot.execute_tool_call(
+        (
+            rejected,
+            rejected_tokens,
+            rejected_memory_ids,
+            rejected_pending_actions,
+        ) = chatbot.execute_tool_call(
             types.SimpleNamespace(name="not_registered", arguments="{}")
         )
 
@@ -291,10 +327,12 @@ class ChatbotTest(unittest.TestCase):
         self.assertTrue(json.loads(success)["ok"])
         self.assertEqual(success_tokens, 0)
         self.assertEqual(success_memory_ids, [])
+        self.assertEqual(success_pending_actions, [])
         self.assertFalse(json.loads(rejected)["ok"])
         self.assertEqual(json.loads(rejected)["error"], "unknown tool")
         self.assertEqual(rejected_tokens, 0)
         self.assertEqual(rejected_memory_ids, [])
+        self.assertEqual(rejected_pending_actions, [])
 
     def test_search_memory_returns_public_data_and_runtime_metadata(self) -> None:
         client = FakeClient()
@@ -343,6 +381,84 @@ class ChatbotTest(unittest.TestCase):
                 store,
                 "q" * (chatbot.MEMORY_SEARCH_MAX_CHARS + 1),
             )
+
+    def test_remember_memory_creates_a_policy_checked_pending_action(self) -> None:
+        result = chatbot.remember_memory(
+            content="  The user plans to take IELTS next May.  ",
+            memory_type="semantic",
+            reason="explicit_request",
+        )
+
+        self.assertEqual(result.data["status"], "accepted_for_commit")
+        self.assertEqual(result.data["memory_type"], "semantic")
+        self.assertEqual(result.token_usage, 0)
+        self.assertEqual(result.used_memory_ids, [])
+        self.assertEqual(
+            result.pending_actions,
+            [
+                {
+                    "type": "remember_memory",
+                    "candidate": {
+                        "content": "The user plans to take IELTS next May.",
+                        "memory_type": "semantic",
+                    },
+                    "reason": "explicit_request",
+                }
+            ],
+        )
+
+    def test_remember_memory_rejects_sensitive_content_before_commit(self) -> None:
+        result = chatbot.remember_memory(
+            content="The user's API key is sk-example-secret-1234.",
+            memory_type="semantic",
+            reason="explicit_request",
+        )
+
+        self.assertEqual(result.data["status"], "rejected")
+        self.assertIn("敏感", result.data["reason"])
+        self.assertEqual(result.pending_actions, [])
+
+    def test_request_forget_memory_only_creates_an_approval_request(self) -> None:
+        store = fake_memory_store()
+        memory_id = store.add(
+            [
+                chatbot.EmbeddedMemoryCandidate(
+                    content="The user plans to take IELTS next May.",
+                    memory_type="semantic",
+                    importance_score=5,
+                    embedding=[1.0],
+                )
+            ],
+            source="agent",
+        )[0]
+
+        result = chatbot.request_forget_memory(
+            store,
+            memory_id=memory_id,
+            reason="The user explicitly asked to remove it.",
+        )
+
+        self.assertEqual(result.data["status"], "pending_approval")
+        self.assertEqual(result.data["memory_id"], memory_id)
+        self.assertEqual(store.count(), 1)
+        self.assertEqual(result.pending_actions[0]["type"], "forget_memory")
+
+    def test_memory_preview_is_exact_and_bounded(self) -> None:
+        store = fake_memory_store()
+        memory_id = store.add(
+            [
+                chatbot.EmbeddedMemoryCandidate(
+                    content="A memory that is longer than the preview.",
+                    memory_type="episodic",
+                    importance_score=2,
+                    embedding=[1.0],
+                )
+            ],
+            source="agent",
+        )[0]
+
+        self.assertEqual(store.get_preview(memory_id, max_chars=8), "A memory...")
+        self.assertIsNone(store.get_preview("missing-id"))
 
     def test_model_can_answer_without_calling_a_tool(self) -> None:
         client = FakeClient()
@@ -501,6 +617,41 @@ class ChatbotTest(unittest.TestCase):
             search_observation["result"]["memories"][0]["memory_id"],
             memory_id,
         )
+
+    def test_agent_collects_pending_memory_actions_until_final_answer(self) -> None:
+        client = FakeClient()
+        remember_call = types.SimpleNamespace(
+            type="function_call",
+            call_id="remember-1",
+            name="remember_memory",
+            arguments=json.dumps(
+                {
+                    "content": "The user plans to take IELTS next May.",
+                    "memory_type": "semantic",
+                    "reason": "explicit_request",
+                }
+            ),
+        )
+        client.responses.create_results = [
+            fake_model_response("", [remember_call], 11),
+            fake_model_response("好，我會記住。", [], 17),
+        ]
+
+        result = chatbot.run_model_with_tools(
+            client,
+            [{"role": "user", "content": "請記住我明年五月要考 IELTS。"}],
+            fake_memory_store(),
+        )
+
+        observation = json.loads(client.responses.calls[1]["input"][-1]["output"])
+        self.assertEqual(result["stop_reason"], "final_answer")
+        self.assertEqual(result["tool_steps"], 1)
+        self.assertEqual(len(result["pending_actions"]), 1)
+        self.assertEqual(
+            observation["result"]["status"],
+            "accepted_for_commit",
+        )
+        self.assertNotIn("pending_actions", observation["result"])
 
     def test_agent_loop_stops_before_executing_a_tool_beyond_the_limit(self) -> None:
         client = FakeClient()
@@ -877,6 +1028,73 @@ class ChatbotTest(unittest.TestCase):
         self.assertEqual(stored.memory_id, memory_ids[0])
         self.assertEqual(stored.importance_score, 4)
         self.assertEqual(storage_tokens, 13)
+
+    def test_commit_remember_actions_revalidates_and_uses_write_pipeline(self) -> None:
+        client = FakeClient()
+        store = fake_memory_store()
+        pending_actions = chatbot.remember_memory(
+            content="The user plans to take IELTS next May.",
+            memory_type="semantic",
+            reason="explicit_request",
+        ).pending_actions
+
+        tokens = chatbot.commit_remember_actions(client, store, pending_actions)
+
+        stored = store.list_all()
+        self.assertEqual(tokens, 13)
+        self.assertEqual(len(stored), 1)
+        self.assertEqual(stored[0].content, "The user plans to take IELTS next May.")
+        self.assertEqual(stored[0].source, "agent")
+
+    def test_commit_rejects_a_pending_action_modified_to_sensitive_data(self) -> None:
+        client = FakeClient()
+        store = fake_memory_store()
+        pending_actions = chatbot.remember_memory(
+            content="The user plans to take IELTS next May.",
+            memory_type="semantic",
+            reason="explicit_request",
+        ).pending_actions
+        pending_actions[0]["candidate"]["content"] = (
+            "The user's API key is sk-example-secret-1234."
+        )
+
+        tokens = chatbot.commit_remember_actions(client, store, pending_actions)
+
+        self.assertEqual(tokens, 0)
+        self.assertEqual(store.count(), 0)
+
+    def test_forget_review_requires_explicit_user_approval(self) -> None:
+        store = fake_memory_store()
+        memory_id = store.add(
+            [
+                chatbot.EmbeddedMemoryCandidate(
+                    content="The user's goal is IELTS.",
+                    memory_type="semantic",
+                    importance_score=5,
+                    embedding=[1.0],
+                )
+            ],
+            source="agent",
+        )[0]
+        action = chatbot.request_forget_memory(
+            store,
+            memory_id,
+            "The user asked to forget this goal.",
+        ).pending_actions
+
+        with (
+            patch.object(builtins, "input", return_value="n"),
+            contextlib.redirect_stdout(StringIO()),
+        ):
+            chatbot.review_forget_actions(store, action)
+        self.assertEqual(store.count(), 1)
+
+        with (
+            patch.object(builtins, "input", return_value="yes"),
+            contextlib.redirect_stdout(StringIO()),
+        ):
+            chatbot.review_forget_actions(store, action)
+        self.assertEqual(store.count(), 0)
 
     def test_exact_duplicate_is_skipped_without_reconciliation_call(self) -> None:
         client = FakeClient()
