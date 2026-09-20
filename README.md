@@ -2,7 +2,7 @@
 
 Memora 是《從 Stateless LLM 到 Agentic Memory：30 天打造會記憶的 AI Agent》系列所實作的個人英文學習助理。
 
-專案會從一個每次請求都彼此獨立的 Stateless Chatbot 開始，逐步加入對話紀錄、短期記憶、語意搜尋、長期記憶、使用者輪廓、記憶生命週期、工具呼叫與 Agent Loop。
+專案從一個每次請求都彼此獨立的 Stateless Chatbot 開始，逐步加入對話紀錄、短期記憶、語意搜尋、長期記憶、使用者輪廓、記憶生命週期、工具呼叫與 Agent Loop。
 
 ## 為什麼從 Stateless 開始？
 
