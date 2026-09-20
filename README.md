@@ -64,22 +64,50 @@ Agentic Memory
 - Day 27：完成 `Memora v0.23`，將單次 Tool Calling 改為最多四個 Actions 的 Agent Loop，讓模型能根據 Observation 繼續決策，並記錄 Tool Steps、Token Usage 與 Stop Reason。
 - Day 28：完成 `Memora v0.24`，把既有 Long-term Memory Retrieval 封裝成唯讀的 `search_memory` Tool，讓 Agent 能在初始 Context 不足時主動提出精確查詢，同時保留 Retrieval Policy、Token Usage 與 Recency 更新邊界。
 - Day 29：完成 `Memora v0.25`，讓 Agent 自行選擇 `search_memory`、`remember_memory` 與 `request_forget_memory`；寫入會先成為 Pending Action，只有成功回答後才經 Policy、Importance 與 Reconciliation 提交，刪除則必須再由使用者確認。
+- Day 30：完成 `Memora v1.0`，加入環境設定、啟動檢查、Command Router、安全日誌、錯誤復原與端到端測試，整理成可直接執行的單人本機 Agentic Memory Assistant。
 
 ## 執行方式
 
 需求：Python 3.10 以上，以及可使用 OpenAI API 的金鑰。
 
+macOS / Linux：
+
 ```bash
 python -m venv .venv
-source .venv/bin/activate  # Windows PowerShell：.venv\Scripts\Activate.ps1
+source .venv/bin/activate
 pip install -r requirements.txt
 export OPENAI_API_KEY="你的 API Key"
 python chatbot.py
 ```
 
-輸入 `history` 可查看目前對話，`memories` 可查看長期記憶及 Importance／Recency，`policy` 可查看最近一次手動寫入判斷，`search <query>` 可測試語意搜尋，`profile` 可查看目前使用者設定，`exit` 則結束程式。手動記憶格式為 `remember semantic <內容>` 或 `remember episodic <內容>`；一般聊天不再固定檢索或抽取長期記憶，Agent 會在最多四個 Tool Steps 內自行選擇 `search_memory`、`remember_memory`、`request_forget_memory` 或 `count_english_words`。Agent 提出的記憶只有在 Final Answer 成功後才會提交，忘記請求也必須由使用者再次確認。API Key 由環境變數讀取，不會寫進原始碼或 Git repository。
+Windows PowerShell：
 
-Conversation History 只存在目前 Process；經過抽取的 Long-term Memory 會保存在 `memora_db/`，User Profile 則保存在 `user_profile.json`。兩者都已排除於 Git，以免誤提交個人資料。
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+$env:OPENAI_API_KEY="你的 API Key"
+python chatbot.py
+```
+
+啟動後輸入 `help` 可查看全部指令。常用指令包括 `status`、`history`、`memories`、`search <query>`、`profile`、`forget <memory_id>` 與 `exit`；其他一般句子會交給 Agent 處理。Agent 會自行判斷是否使用 `search_memory`、`remember_memory`、`request_forget_memory` 或 `count_english_words`，但只有成功產生 Final Answer 後才會提交記憶，刪除記憶也一定要由使用者再次確認。
+
+## 設定與資料
+
+除了必要的 `OPENAI_API_KEY`，也可以使用下列環境變數調整執行方式：
+
+| 環境變數 | 預設值 | 用途 |
+| --- | --- | --- |
+| `MEMORA_MODEL` | `gpt-5-mini` | 對話與 Agent 使用的模型 |
+| `MEMORA_EMBEDDING_MODEL` | `text-embedding-3-small` | Memory Embedding 模型 |
+| `MEMORA_DB_PATH` | `./memora_db` | Long-term Memory 資料庫位置 |
+| `MEMORA_PROFILE_PATH` | `./user_profile.json` | User Profile 檔案位置 |
+| `MEMORA_MAX_AGENT_STEPS` | `4` | 每輪最多 Tool Steps |
+| `MEMORA_LOG_LEVEL` | `INFO` | 日誌層級 |
+
+Conversation History 只存在目前 Process；Long-term Memory 與 User Profile 則分別保存在上述路徑。這些個人資料已排除於 Git，日誌也只記錄 Action 名稱、步數與 Token，不輸出完整對話或記憶內容。
+
+Memora v1.0 的產品邊界是 Single-user Local CLI；如果要改成多人 Web Service，還需要加入身分驗證、授權與使用者資料隔離。
 
 ## 系列文章
 
@@ -112,3 +140,4 @@ Conversation History 只存在目前 Process；經過抽取的 Long-term Memory 
 - [Day 27｜打造 Agent Loop：Action、Observation 與 Stop](https://ithelp.ithome.com.tw/articles/10412918)
 - [Day 28｜Memory × Tool × Agent：第一次走向 Agentic Memory](https://ithelp.ithome.com.tw/articles/10413496)
 - [Day 29｜Agentic Memory：讓 Agent 自己決定何時記、何時找、何時忘](https://ithelp.ithome.com.tw/articles/10414086)
+- [Day 30｜完成產品：把 Memora 整理成可執行的 Agentic Memory Assistant](https://ithelp.ithome.com.tw/articles/10414611)

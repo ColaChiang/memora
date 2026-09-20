@@ -193,6 +193,7 @@ class ChatbotTest(unittest.TestCase):
             [
                 "我的英文程度是 B1。",
                 "我的英文程度是多少？",
+                "status",
                 "history",
                 "exit",
             ]
@@ -200,6 +201,7 @@ class ChatbotTest(unittest.TestCase):
         output = StringIO()
 
         with (
+            patch.object(chatbot, "validate_startup"),
             patch.object(chatbot, "OpenAI", return_value=client),
             patch.object(
                 chatbot,
@@ -239,6 +241,7 @@ class ChatbotTest(unittest.TestCase):
         inputs = iter(["Explain present perfect.", "exit"])
 
         with (
+            patch.object(chatbot, "validate_startup"),
             patch.object(chatbot, "OpenAI", return_value=client),
             patch.object(
                 chatbot,
@@ -769,31 +772,247 @@ class ChatbotTest(unittest.TestCase):
         self.assertEqual(stats["reserved_input_tokens"], 20)
         self.assertEqual(stats["estimated_input_tokens"], 30)
 
-    def test_remember_command_saves_a_candidate(self) -> None:
+    def test_load_settings_reads_environment_overrides(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as temp_dir,
+            patch.dict(
+                chatbot.os.environ,
+                {
+                    "MEMORA_MODEL": "test-model",
+                    "MEMORA_EMBEDDING_MODEL": "test-embedding",
+                    "MEMORA_DB_PATH": f"{temp_dir}/db",
+                    "MEMORA_PROFILE_PATH": f"{temp_dir}/profile.json",
+                    "MEMORA_MAX_AGENT_STEPS": "2",
+                    "MEMORA_LOG_LEVEL": "debug",
+                },
+                clear=True,
+            ),
+        ):
+            settings = chatbot.load_settings()
+
+        self.assertEqual(settings.model, "test-model")
+        self.assertEqual(settings.embedding_model, "test-embedding")
+        self.assertEqual(settings.memory_db_path, chatbot.Path(temp_dir) / "db")
+        self.assertEqual(
+            settings.user_profile_path,
+            chatbot.Path(temp_dir) / "profile.json",
+        )
+        self.assertEqual(settings.max_agent_steps, 2)
+        self.assertEqual(settings.log_level, "DEBUG")
+
+    def test_agent_step_setting_must_be_a_positive_integer(self) -> None:
+        for invalid_value in ("0", "-1", "many"):
+            with (
+                self.subTest(value=invalid_value),
+                patch.dict(
+                    chatbot.os.environ,
+                    {"MEMORA_MAX_AGENT_STEPS": invalid_value},
+                    clear=True,
+                ),
+                self.assertRaises(ValueError),
+            ):
+                chatbot.load_settings()
+
+    def test_startup_validation_requires_api_key(self) -> None:
+        settings = chatbot.Settings(
+            model="test-model",
+            embedding_model="test-embedding",
+            memory_db_path=chatbot.Path("unused-db"),
+            user_profile_path=chatbot.Path("unused-profile.json"),
+            max_agent_steps=1,
+            log_level="INFO",
+        )
+
+        with (
+            patch.dict(chatbot.os.environ, {}, clear=True),
+            self.assertRaisesRegex(RuntimeError, "OPENAI_API_KEY"),
+        ):
+            chatbot.validate_startup(settings)
+
+    def test_startup_validation_creates_data_directories(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings = chatbot.Settings(
+                model="test-model",
+                embedding_model="test-embedding",
+                memory_db_path=chatbot.Path(temp_dir) / "database" / "memories",
+                user_profile_path=chatbot.Path(temp_dir) / "profile" / "user.json",
+                max_agent_steps=1,
+                log_level="INFO",
+            )
+            with patch.dict(
+                chatbot.os.environ,
+                {"OPENAI_API_KEY": "test-key"},
+                clear=True,
+            ):
+                chatbot.validate_startup(settings)
+
+            self.assertTrue(settings.memory_db_path.is_dir())
+            self.assertTrue(settings.user_profile_path.parent.is_dir())
+
+    def test_command_router_handles_management_commands_only(self) -> None:
         client = FakeClient()
-        inputs = iter(["remember semantic 我的英文程度是 B1。", "memories", "exit"])
+        output = StringIO()
+        memory = chatbot.ShortTermMemory(client)
+        store = fake_memory_store()
+        profile_store = chatbot.UserProfileStore(chatbot.Path("missing-profile.json"))
+
+        with contextlib.redirect_stdout(output):
+            handled = chatbot.handle_command(
+                "help",
+                client,
+                memory,
+                store,
+                profile_store,
+            )
+            natural_language = chatbot.handle_command(
+                "Please explain the present perfect.",
+                client,
+                memory,
+                store,
+                profile_store,
+            )
+
+        self.assertTrue(handled)
+        self.assertFalse(natural_language)
+        self.assertIn("Commands:", output.getvalue())
+
+    def test_forget_command_keeps_explicit_approval_boundary(self) -> None:
+        client = FakeClient()
+        memory = chatbot.ShortTermMemory(client)
+        store = fake_memory_store()
+        profile_store = chatbot.UserProfileStore(chatbot.Path("missing-profile.json"))
+        memory_id = store.add(
+            [
+                chatbot.EmbeddedMemoryCandidate(
+                    content="The user plans to take IELTS next May.",
+                    memory_type="semantic",
+                    importance_score=5,
+                    embedding=[1.0],
+                )
+            ],
+            source="agent",
+        )[0]
+
+        with (
+            patch.object(builtins, "input", return_value="yes"),
+            contextlib.redirect_stdout(StringIO()),
+        ):
+            handled = chatbot.handle_command(
+                f"forget {memory_id}",
+                client,
+                memory,
+                store,
+                profile_store,
+            )
+
+        self.assertTrue(handled)
+        self.assertEqual(store.count(), 0)
+
+    def test_process_chat_turn_finishes_conversation_state(self) -> None:
+        client = FakeClient()
+        client.responses.create_results = [
+            fake_model_response("I have finished my homework.", [], 9)
+        ]
+        memory = chatbot.ShortTermMemory(client)
+
+        result = chatbot.process_chat_turn(
+            "Give me an example.",
+            client,
+            memory,
+            fake_memory_store(),
+            chatbot.UserProfileStore(chatbot.Path("missing-profile.json")),
+        )
+
+        self.assertEqual(result["stop_reason"], "final_answer")
+        self.assertEqual(
+            memory.history,
+            [
+                {"role": "user", "content": "Give me an example."},
+                {
+                    "role": "assistant",
+                    "content": "I have finished my homework.",
+                },
+            ],
+        )
+        self.assertEqual(memory.session_total_tokens, 9)
+
+    def test_process_chat_turn_rolls_back_an_unfinished_request(self) -> None:
+        client = FakeClient()
+        memory = chatbot.ShortTermMemory(client)
+
+        with (
+            patch.object(
+                chatbot,
+                "run_model_with_tools",
+                side_effect=RuntimeError("offline"),
+            ),
+            self.assertRaises(RuntimeError),
+        ):
+            chatbot.process_chat_turn(
+                "This request will fail.",
+                client,
+                memory,
+                fake_memory_store(),
+                chatbot.UserProfileStore(chatbot.Path("missing-profile.json")),
+            )
+
+        self.assertEqual(memory.history, [])
+
+    def test_agent_logs_actions_without_tool_content(self) -> None:
+        client = FakeClient()
+        private_text = "private sentence that must stay out of logs"
+        tool_call = types.SimpleNamespace(
+            type="function_call",
+            call_id="call-private",
+            name="count_english_words",
+            arguments=json.dumps({"text": private_text}),
+        )
+        client.responses.create_results = [
+            fake_model_response("", [tool_call], 5),
+            fake_model_response("The sentence has eight words.", [], 7),
+        ]
+
+        with self.assertLogs(chatbot.logger, level="INFO") as captured:
+            chatbot.run_model_with_tools(
+                client,
+                [{"role": "user", "content": "Count my sentence."}],
+                fake_memory_store(),
+            )
+
+        log_output = "\n".join(captured.output)
+        self.assertIn("action=count_english_words", log_output)
+        self.assertNotIn(private_text, log_output)
+
+    def test_main_recovers_from_one_failed_chat_turn(self) -> None:
+        client = FakeClient()
+        inputs = iter(["Please explain this.", "exit"])
         output = StringIO()
 
         with (
+            patch.object(chatbot, "validate_startup"),
             patch.object(chatbot, "OpenAI", return_value=client),
             patch.object(
                 chatbot,
                 "create_long_term_memory_store",
-                return_value=chatbot.LongTermMemoryStore("", "", FakeCollection()),
+                return_value=fake_memory_store(),
             ),
             patch.object(
                 chatbot,
                 "create_user_profile_store",
                 return_value=chatbot.UserProfileStore(chatbot.Path("missing-profile.json")),
             ),
+            patch.object(
+                chatbot,
+                "process_chat_turn",
+                side_effect=RuntimeError("offline"),
+            ),
             patch.object(builtins, "input", side_effect=lambda _="": next(inputs)),
             contextlib.redirect_stdout(output),
         ):
             chatbot.main()
 
-        self.assertIn("Stored 1 memory.", output.getvalue())
-        self.assertIn("1. 我的英文程度是 B1。", output.getvalue())
-        self.assertIn("Source: manual", output.getvalue())
+        self.assertIn("這一輪暫時無法完成", output.getvalue())
+        self.assertIn("Bye!", output.getvalue())
 
     def test_extracts_structured_memory_candidates(self) -> None:
         client = FakeClient()

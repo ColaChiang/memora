@@ -1,10 +1,12 @@
-"""Memora v0.25: let the agent choose when to find, remember, or forget."""
+"""Memora v1.0: a runnable local Agentic Memory Assistant."""
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from functools import partial
 import json
+import logging
+import os
 import re
 from pathlib import Path
 from typing import Literal
@@ -18,8 +20,54 @@ from openai import OpenAI
 from pydantic import BaseModel, Field
 
 
-MODEL = "gpt-5-mini"
-EMBEDDING_MODEL = "text-embedding-3-small"
+logger = logging.getLogger("memora")
+
+
+@dataclass(frozen=True)
+class Settings:
+    model: str
+    embedding_model: str
+    memory_db_path: Path
+    user_profile_path: Path
+    max_agent_steps: int
+    log_level: str
+
+
+def read_positive_int(name: str, default: int) -> int:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    try:
+        value = int(raw_value)
+    except ValueError as error:
+        raise ValueError(f"{name} must be an integer.") from error
+    if value <= 0:
+        raise ValueError(f"{name} must be greater than 0.")
+    return value
+
+
+def load_settings() -> Settings:
+    base_dir = Path(__file__).resolve().parent
+    return Settings(
+        model=os.getenv("MEMORA_MODEL", "gpt-5-mini"),
+        embedding_model=os.getenv(
+            "MEMORA_EMBEDDING_MODEL",
+            "text-embedding-3-small",
+        ),
+        memory_db_path=Path(
+            os.getenv("MEMORA_DB_PATH", str(base_dir / "memora_db"))
+        ),
+        user_profile_path=Path(
+            os.getenv("MEMORA_PROFILE_PATH", str(base_dir / "user_profile.json"))
+        ),
+        max_agent_steps=read_positive_int("MEMORA_MAX_AGENT_STEPS", 4),
+        log_level=os.getenv("MEMORA_LOG_LEVEL", "INFO").upper(),
+    )
+
+
+SETTINGS = load_settings()
+MODEL = SETTINGS.model
+EMBEDDING_MODEL = SETTINGS.embedding_model
 RECONCILIATION_MODEL = "gpt-5.6"
 SEARCH_TOP_K = 3
 RETRIEVAL_CANDIDATE_K = 8
@@ -43,14 +91,30 @@ ALLOWED_AGENT_MEMORY_REASONS = {
     "explicit_request",
     "useful_future_context",
 }
-MAX_AGENT_STEPS = 4
+MAX_AGENT_STEPS = SETTINGS.max_agent_steps
 TOOL_STEP_TOKEN_RESERVE = 1600
 AGENT_TURN_TOKEN_RESERVE = TOOL_STEP_TOKEN_RESERVE * MAX_AGENT_STEPS
 MAX_INPUT_TOKENS = 8000
 MAX_RECENT_TURNS = 3
-BASE_DIR = Path(__file__).resolve().parent
-MEMORY_DB_PATH = BASE_DIR / "memora_db"
-USER_PROFILE_PATH = BASE_DIR / "user_profile.json"
+MEMORY_DB_PATH = SETTINGS.memory_db_path
+USER_PROFILE_PATH = SETTINGS.user_profile_path
+
+
+def configure_logging(settings: Settings = SETTINGS) -> None:
+    log_level = getattr(logging, settings.log_level, logging.INFO)
+    logging.basicConfig(
+        level=log_level,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+
+
+def validate_startup(settings: Settings = SETTINGS) -> None:
+    if not os.getenv("OPENAI_API_KEY"):
+        raise RuntimeError(
+            "OPENAI_API_KEY is not set. Set it before starting Memora."
+        )
+    settings.memory_db_path.mkdir(parents=True, exist_ok=True)
+    settings.user_profile_path.parent.mkdir(parents=True, exist_ok=True)
 
 SYSTEM_PROMPT = """
 You are Memora, a personal English learning assistant.
@@ -1201,7 +1265,7 @@ def reconcile_and_store_memory(
     candidates = find_reconciliation_candidates(long_term_memory, incoming)
     exact_duplicate = find_exact_duplicate(incoming, candidates)
     if exact_duplicate is not None:
-        print("Memory reconciliation: skip (exact duplicate)")
+        logger.info("memory_reconciliation action=skip reason=exact_duplicate")
         return [], 0
     if not candidates:
         return long_term_memory.add([incoming], source=source), 0
@@ -1211,7 +1275,7 @@ def reconcile_and_store_memory(
         incoming,
         candidates,
     )
-    print("Memory reconciliation:", decision.action, "-", decision.reason)
+    logger.info("memory_reconciliation action=%s", decision.action)
     if decision.action in {"create", "keep_both"}:
         return (
             long_term_memory.add([incoming], source=source),
@@ -1220,7 +1284,7 @@ def reconcile_and_store_memory(
     if decision.action == "skip":
         return [], reconciliation_tokens
     if decision.action == "review":
-        print("Memory was not changed. Manual review is required.")
+        logger.info("memory_reconciliation manual_review_required=true")
         return [], reconciliation_tokens
 
     target_memory_id = decision.target_memory_id
@@ -1284,8 +1348,8 @@ def commit_remember_actions(
                 reason=action.get("reason"),
             )
             if validation_result.data.get("status") != "accepted_for_commit":
-                print(
-                    "Memory commit rejected:",
+                logger.warning(
+                    "memory_commit_rejected reason=%s",
                     validation_result.data.get("reason", "policy_rejected"),
                 )
                 continue
@@ -1299,11 +1363,11 @@ def commit_remember_actions(
             )
             total_tokens += current_tokens
             if affected_memory_ids:
-                print("Memory committed:", len(affected_memory_ids))
+                logger.info("memory_commit affected_count=%s", len(affected_memory_ids))
             else:
-                print("Memory commit made no change.")
+                logger.info("memory_commit affected_count=0")
         except Exception as error:
-            print("Could not commit memory:", error)
+            logger.exception("memory_commit_failed")
     return total_tokens
 
 
@@ -1335,7 +1399,7 @@ def review_forget_actions(
             else:
                 print("Memory no longer exists.")
         except (KeyError, TypeError, ValueError) as error:
-            print("Could not review forget request:", error)
+            logger.warning("forget_review_invalid error=%s", error)
 
 
 def build_profile_context(profile: UserProfile) -> str:
@@ -1466,7 +1530,7 @@ def run_model_with_tools(
                 parallel_tool_calls=False,
             )
         except Exception as error:
-            print("Agent API error:", error)
+            logger.exception("agent_api_error")
             return {
                 "reply": "目前無法完成這個任務，請稍後再試。",
                 "response_tokens": response_tokens,
@@ -1520,7 +1584,11 @@ def run_model_with_tools(
         working_input += response.output
         tool_call = function_calls[0]
         tool_steps += 1
-        print(f"[Agent step {tool_steps}] Action: {tool_call.name}")
+        logger.info(
+            "agent_step=%s action=%s",
+            tool_steps,
+            tool_call.name,
+        )
         try:
             (
                 tool_output,
@@ -1532,7 +1600,7 @@ def run_model_with_tools(
                 tool_handlers=runtime_tool_handlers,
             )
         except Exception as error:
-            print("Tool execution error:", error)
+            logger.exception("tool_execution_error")
             return {
                 "reply": "工具執行失敗，這次任務已停止。",
                 "response_tokens": response_tokens,
@@ -1550,7 +1618,10 @@ def run_model_with_tools(
         for action in current_pending_actions:
             if action not in pending_actions:
                 pending_actions.append(action)
-        print(f"[Agent step {tool_steps}] Observation: {tool_output}")
+        logger.debug(
+            "agent_step=%s observation_received=true",
+            tool_steps,
+        )
         working_input.append(
             {
                 "type": "function_call_output",
@@ -1778,213 +1849,292 @@ def print_messages(title: str, messages: list[dict[str, str]]) -> None:
     print("----------------------------")
 
 
-def main() -> None:
-    client = OpenAI()
-    memory = ShortTermMemory(client=client)
-    long_term_memory = create_long_term_memory_store()
-    user_profile_store = create_user_profile_store()
-    last_extraction_output = ""
-    last_policy_output = ""
-
-    print("Memora v0.25")
+def print_help() -> None:
     print(
-        "Commands: history, context, summary, status, "
-        "remember <semantic|episodic> <text>, memories, extraction, policy, "
-        "search <query>, profile, exit"
+        """
+Commands:
+  help                         顯示可用指令
+  history                      顯示完整對話紀錄
+  context                      顯示最近一次送出的 Context
+  summary                      顯示目前的對話摘要
+  status                       顯示目前狀態
+  memories                     列出 Long-term Memory
+  search <query>               手動搜尋 Memory
+  profile                      顯示 User Profile
+  profile level <level>        設定英文程度
+  profile goal <goal>          新增學習目標
+  profile preference <text>    新增回答偏好
+  forget <memory_id>           要求刪除指定 Memory
+  exit                         結束 Memora
+
+一般句子會交給 Agent 處理。
+        """.strip()
     )
 
+
+def print_memories(long_term_memory: LongTermMemoryStore) -> None:
+    print("\n--- Long-term Memories ---")
+    stored_memories = long_term_memory.list_all()
+    if not stored_memories:
+        print("(no memories)")
+    for index, stored_memory in enumerate(stored_memories, start=1):
+        recency_score = calculate_memory_recency_score(
+            stored_memory.last_accessed_at,
+            stored_memory.updated_at,
+        )
+        print(f"{index}. {stored_memory.content}")
+        print(f"   ID: {stored_memory.memory_id}")
+        print(f"   Type: {stored_memory.memory_type}")
+        print(f"   Importance: {stored_memory.importance_score}/5")
+        print(f"   Source: {stored_memory.source}")
+        print(f"   Created at: {stored_memory.created_at}")
+        print(f"   Updated at: {stored_memory.updated_at}")
+        print(f"   Last accessed: {stored_memory.last_accessed_at}")
+        print(f"   Recency: {recency_score:.3f}")
+    print("--------------------------")
+
+
+def print_status(
+    memory: ShortTermMemory,
+    long_term_memory: LongTermMemoryStore,
+) -> None:
+    print("\n--- Memora Status ---")
+    for name, value in memory.get_status().items():
+        print(f"{name}: {value}")
+    print("Long-term memories:", long_term_memory.count())
+    print("Model:", MODEL)
+    print("Embedding model:", EMBEDDING_MODEL)
+    print("Max agent steps:", MAX_AGENT_STEPS)
+    print("---------------------")
+
+
+def handle_memory_command(
+    command_name: str,
+    command_value: str,
+    client: OpenAI,
+    memory: ShortTermMemory,
+    long_term_memory: LongTermMemoryStore,
+) -> bool:
+    if command_name == "status":
+        print_status(memory, long_term_memory)
+        return True
+    if command_name == "memories":
+        print_memories(long_term_memory)
+        return True
+    if command_name == "search":
+        if not command_value:
+            print("Usage: search <query>")
+            return True
+        try:
+            search_results, search_tokens = semantic_search(
+                client,
+                command_value,
+                long_term_memory,
+            )
+            memory.add_token_usage(search_tokens)
+        except Exception:
+            logger.exception("manual_memory_search_failed")
+            print("Memory search failed. Please try again.")
+            return True
+
+        print(f"\n--- Semantic Search: {command_value} ---")
+        if not search_results:
+            print("(no memories)")
+        for rank, result in enumerate(search_results, start=1):
+            print(f"{rank}. [{result.score:.4f}] {result.content}")
+            print(f"   Type: {result.memory_type}")
+            print(f"   Importance: {result.importance_score}/5")
+            print(f"   Source: {result.source}; ID: {result.memory_id}")
+        print("--------------------------------")
+        return True
+    if command_name == "forget":
+        if not command_value:
+            print("Usage: forget <memory_id>")
+            return True
+        try:
+            forget_request = request_forget_memory(
+                long_term_memory,
+                memory_id=command_value,
+                reason="The user requested deletion through a management command.",
+            )
+        except (TypeError, ValueError) as error:
+            print("Forget request failed:", error)
+            return True
+        review_forget_actions(
+            long_term_memory,
+            forget_request.pending_actions,
+        )
+        return True
+    return False
+
+
+def handle_command(
+    user_input: str,
+    client: OpenAI,
+    memory: ShortTermMemory,
+    long_term_memory: LongTermMemoryStore,
+    user_profile_store: UserProfileStore,
+) -> bool:
+    command_name, _, command_value = user_input.partition(" ")
+    command_name = command_name.lower()
+    command_value = command_value.strip()
+
+    if command_name == "help":
+        print_help()
+        return True
+    if command_name == "profile":
+        return handle_profile_command(user_input, user_profile_store)
+    if command_name == "history":
+        print_messages("Full Conversation History", memory.history)
+        return True
+    if command_name == "context":
+        print_messages("Last Request Context", memory.last_context)
+        return True
+    if command_name == "summary":
+        print("\n--- Conversation Summary ---")
+        print(memory.summary or "(empty)")
+        print("----------------------------")
+        return True
+    if command_name in {"status", "memories", "search", "forget"}:
+        return handle_memory_command(
+            command_name,
+            command_value,
+            client,
+            memory,
+            long_term_memory,
+        )
+    return False
+
+
+def log_agent_result(agent_result: dict[str, object]) -> None:
+    logger.info(
+        (
+            "agent_finished stop_reason=%s tool_steps=%s "
+            "response_tokens=%s tool_tokens=%s"
+        ),
+        agent_result["stop_reason"],
+        agent_result["tool_steps"],
+        agent_result["response_tokens"],
+        agent_result["tool_tokens"],
+    )
+
+
+def process_chat_turn(
+    user_input: str,
+    client: OpenAI,
+    memory: ShortTermMemory,
+    long_term_memory: LongTermMemoryStore,
+    user_profile_store: UserProfileStore,
+) -> dict[str, object]:
+    memory.add_user_message(user_input)
+    try:
+        background_messages = build_background_messages(
+            profile=user_profile_store.get(),
+            memories=[],
+        )
+        memory_stats = memory.prepare_context(
+            background_messages=background_messages,
+            reserved_input_tokens=AGENT_TURN_TOKEN_RESERVE,
+        )
+        agent_result = run_model_with_tools(
+            client,
+            input_messages=memory_stats["context_messages"],
+            long_term_memory=long_term_memory,
+        )
+        memory.add_token_usage(int(agent_result["tool_tokens"]))
+    except Exception:
+        memory.rollback_last_user_message()
+        raise
+
+    if agent_result["stop_reason"] == "final_answer":
+        commit_tokens = commit_remember_actions(
+            client=client,
+            long_term_memory=long_term_memory,
+            pending_actions=agent_result["pending_actions"],
+        )
+        memory.add_token_usage(commit_tokens)
+        try:
+            long_term_memory.touch(agent_result["used_memory_ids"])
+        except Exception:
+            logger.exception("memory_touch_failed")
+
+    memory.finish_turn(
+        assistant_reply=str(agent_result["reply"]),
+        context_messages=memory_stats["context_messages"],
+        response_tokens=int(agent_result["response_tokens"]),
+    )
+    log_agent_result(agent_result)
+    return agent_result
+
+
+def print_startup_summary(long_term_memory: LongTermMemoryStore) -> None:
+    print("Memora v1.0")
+    print("Agentic Memory Assistant")
+    print(f"Model: {MODEL}")
+    print(f"Long-term memories: {long_term_memory.count()}")
+    print("輸入 help 查看指令，輸入 exit 結束。")
+
+
+def main() -> None:
+    configure_logging()
+    try:
+        validate_startup()
+        client = OpenAI()
+        memory = ShortTermMemory(client=client)
+        long_term_memory = create_long_term_memory_store()
+        user_profile_store = create_user_profile_store()
+    except Exception as error:
+        logger.exception("startup_failed")
+        print("Memora could not start:", error)
+        return
+
+    print_startup_summary(long_term_memory)
     while True:
-        user_input = input("\nYou: ").strip()
+        try:
+            user_input = input("\nYou: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\nBye!")
+            break
+
         if not user_input:
             continue
-        command = user_input.lower()
-
-        if command == "exit":
+        if user_input.lower() == "exit":
             print("Bye!")
             break
-        if handle_profile_command(user_input, user_profile_store):
-            continue
-        if command == "history":
-            print_messages("Full Conversation History", memory.history)
-            continue
-        if command == "context":
-            print_messages("Last Request Context", memory.last_context)
-            continue
-        if command == "summary":
-            print("\n--- Conversation Summary ---")
-            print(memory.summary or "(empty)")
-            print("----------------------------")
-            continue
-        if command == "memories":
-            print("\n--- Memory Candidates ---")
-            stored_memories = long_term_memory.list_all()
-            if not stored_memories:
-                print("(no memories)")
-            else:
-                for index, stored_memory in enumerate(stored_memories, start=1):
-                    recency_score = calculate_memory_recency_score(
-                        stored_memory.last_accessed_at,
-                        stored_memory.updated_at,
-                    )
-                    print(f"{index}. {stored_memory.content}")
-                    print(f"   ID: {stored_memory.memory_id}")
-                    print(f"   Type: {stored_memory.memory_type}")
-                    print(f"   Importance: {stored_memory.importance_score}/5")
-                    print(f"   Source: {stored_memory.source}")
-                    print(f"   Created at: {stored_memory.created_at}")
-                    print(f"   Updated at: {stored_memory.updated_at}")
-                    print(f"   Last accessed: {stored_memory.last_accessed_at}")
-                    print(f"   Recency: {recency_score:.3f}")
-            print("-------------------------")
-            continue
-        if command == "extraction":
-            print("\n--- Last Extraction Output ---")
-            print(last_extraction_output or "(not run)")
-            print("------------------------------")
-            continue
-        if command == "policy":
-            print("\n--- Last Memory Policy Output ---")
-            print(last_policy_output or "(not run)")
-            print("---------------------------------")
-            continue
-        if command == "search":
-            print("Usage: search <query>")
-            continue
-        if command.startswith("search "):
-            query = user_input[len("search ") :].strip()
-            try:
-                search_results, search_tokens = semantic_search(
-                    client,
-                    query,
-                    long_term_memory,
-                )
-                memory.add_token_usage(search_tokens)
-            except Exception as error:
-                print("Search failed:", error)
-                continue
 
-            print(f"\n--- Semantic Search: {query} ---")
-            if not search_results:
-                print("(no memories)")
-            for rank, result in enumerate(search_results, start=1):
-                print(f"{rank}. [{result.score:.4f}] {result.content}")
-                print(f"   Type: {result.memory_type}")
-                print(f"   Importance: {result.importance_score}/5")
-                print(f"   Source: {result.source}; ID: {result.memory_id}")
-            print("--------------------------------")
-            continue
-        if command == "status":
-            print("\n--- Short-term Memory Status ---")
-            for name, value in memory.get_status().items():
-                print(f"{name}: {value}")
-            print("Long-term memories:", long_term_memory.count())
-            print("Embedding model:", EMBEDDING_MODEL)
-            print("--------------------------------")
-            continue
-        if command == "remember":
-            print("Usage: remember <semantic|episodic> <memory>")
-            continue
-        if command.startswith("remember "):
-            command_value = user_input[len("remember ") :]
-            remember_parts = command_value.strip().split(maxsplit=1)
-            if (
-                len(remember_parts) != 2
-                or remember_parts[0].lower() not in {"semantic", "episodic"}
-            ):
-                print("Usage: remember <semantic|episodic> <memory>")
-                continue
-            memory_type = remember_parts[0].lower()
-            candidate_text = remember_parts[1].strip()
-            candidate = MemoryCandidate(
-                content=candidate_text,
-                memory_type=memory_type,
-            )
-            last_extraction_output = candidate.model_dump_json(indent=2)
-            policy_result = apply_memory_policy([candidate], source="manual")
-            last_policy_output = policy_result.model_dump_json(indent=2)
-            if not policy_result.approved_memories:
-                print("Memory skipped by policy:", policy_result.decisions[0].reason)
-                continue
-            try:
-                stored_memory_ids, memory_storage_tokens = store_accepted_memories(
-                    client,
-                    long_term_memory,
-                    policy_result.approved_memories,
-                    source="manual",
-                )
-                memory.add_token_usage(memory_storage_tokens)
-            except Exception as error:
-                print("Memory storage failed:", error)
-                continue
-            print(f"Stored {len(stored_memory_ids)} memory.")
-            continue
-
-        memory.add_user_message(user_input)
         try:
-            background_messages = build_background_messages(
-                profile=user_profile_store.get(),
-                memories=[],
-            )
-            memory_stats = memory.prepare_context(
-                background_messages=background_messages,
-                reserved_input_tokens=AGENT_TURN_TOKEN_RESERVE,
-            )
-            agent_result = run_model_with_tools(
+            if handle_command(
+                user_input,
                 client,
-                input_messages=memory_stats["context_messages"],
-                long_term_memory=long_term_memory,
-            )
-            assistant_reply = str(agent_result["reply"])
-            response_tokens = int(agent_result["response_tokens"])
-            tool_tokens = int(agent_result["tool_tokens"])
-            memory.add_token_usage(tool_tokens)
-            print(
-                "Agent stopped:",
-                agent_result["stop_reason"],
-                f"({agent_result['tool_steps']} tool steps)",
-            )
-        except Exception as error:
-            memory.rollback_last_user_message()
-            print("Request failed:", error)
+                memory,
+                long_term_memory,
+                user_profile_store,
+            ):
+                continue
+        except Exception:
+            logger.exception("command_failed")
+            print("Command failed. Please try again.")
             continue
 
-        memory_commit_tokens = 0
-        if agent_result["stop_reason"] == "final_answer":
-            memory_commit_tokens = commit_remember_actions(
-                client=client,
-                long_term_memory=long_term_memory,
-                pending_actions=agent_result["pending_actions"],
+        try:
+            agent_result = process_chat_turn(
+                user_input,
+                client,
+                memory,
+                long_term_memory,
+                user_profile_store,
             )
-            memory.add_token_usage(memory_commit_tokens)
-            try:
-                long_term_memory.touch(agent_result["used_memory_ids"])
-            except Exception as error:
-                print("Could not update memory access time:", error)
-        memory.finish_turn(
-            assistant_reply=assistant_reply,
-            context_messages=memory_stats["context_messages"],
-            response_tokens=response_tokens,
-        )
+        except Exception:
+            logger.exception("chat_turn_failed")
+            print("Memora: 這一輪暫時無法完成，請稍後再試一次。")
+            continue
 
-        print("Memora:", assistant_reply)
+        print("Memora:", agent_result["reply"])
         if agent_result["stop_reason"] == "final_answer":
             review_forget_actions(
-                long_term_memory=long_term_memory,
-                pending_actions=agent_result["pending_actions"],
+                long_term_memory,
+                agent_result["pending_actions"],
             )
-        print("\n--- Memory Status ---")
-        print("Newly summarized messages:", memory_stats["newly_summarized_count"])
-        print("Context messages sent:", len(memory_stats["context_messages"]))
-        print("Counted input tokens:", memory_stats["input_tokens"])
-        print("Reserved agent tokens:", memory_stats["reserved_input_tokens"])
-        print("Estimated input tokens:", memory_stats["estimated_input_tokens"])
-        print("Model response tokens:", response_tokens)
-        print("Memory tool tokens:", tool_tokens)
-        print("Summary update tokens:", memory_stats["summary_token_usage"])
-        print("Memory commit tokens:", memory_commit_tokens)
-        print("Long-term memories:", long_term_memory.count())
-        print("Session total tokens:", memory.session_total_tokens)
-        print("---------------------")
 
 
 if __name__ == "__main__":

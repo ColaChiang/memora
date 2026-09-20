@@ -1,3 +1,4 @@
 openai>=1.66.0,<3
 pydantic>=2.0,<3
 chromadb>=1.0,<2
+tiktoken>=0.9,<1
